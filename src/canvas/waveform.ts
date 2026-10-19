@@ -337,11 +337,8 @@ function monoColumn(data: Uint8Array, at: number): Column {
  * sine sweep found (bytes 3, 4 and 5 the bottom, middle and top of the
  * range), so bass is red. Bytes 1 and 2 are not read [UNKNOWN].
  */
-function colourColumn(data: Uint8Array, at: number): Column {
-  return {
-    height: (data[at] ?? 0) / 127,
-    colour: rgbOf(data[at + 3] ?? 0, data[at + 4] ?? 0, data[at + 5] ?? 0),
-  };
+function colourColumn(data: Uint8Array, at: number): RgbColumn {
+  return [(data[at] ?? 0) / 127, data[at + 3] ?? 0, data[at + 4] ?? 0, data[at + 5] ?? 0];
 }
 
 /**
@@ -350,13 +347,13 @@ function colourColumn(data: Uint8Array, at: number): Column {
  * channels track the low, mid and high bands as `PWV4`'s do [OBS 7.2.11,
  * issue #158].
  */
-function colourDetailColumn(data: Uint8Array, at: number): Column {
+function colourDetailColumn(data: Uint8Array, at: number): RgbColumn {
   const word = ((data[at] ?? 0) << 8) | (data[at + 1] ?? 0);
-  return {
-    height: ((word >> 2) & 0x1f) / 0x1f,
-    colour: rgbOf((word >> 13) & 7, (word >> 10) & 7, (word >> 7) & 7),
-  };
+  return [((word >> 2) & 0x1f) / 0x1f, (word >> 13) & 7, (word >> 10) & 7, (word >> 7) & 7];
 }
+
+/** A colour column as numbers: height 0 to 1, then red, green and blue on the tag's own scale. */
+type RgbColumn = [height: number, r: number, g: number, b: number];
 
 /**
  * A column's colour from its three channels, whatever their scale: the
@@ -391,7 +388,11 @@ export function drawColumns(
   const stride = strideOf(palette, detail);
   const columns = Math.floor(data.length / stride);
   if (columns === 0 || width <= 0 || height <= 0) return;
-  const read = palette === "blue" ? monoColumn : detail ? colourDetailColumn : colourColumn;
+  if (palette === "rgb") {
+    drawSmoothRgb(ctx, data, width, height, detail, half, inset);
+    return;
+  }
+  const read = monoColumn;
 
   const top = Math.max(0, Math.min(inset.top, height / 2 - 1));
   const bottom = Math.max(0, Math.min(inset.bottom, height / 2 - 1));
@@ -424,6 +425,95 @@ export function drawColumns(
       ctx.fillRect(x, centre - reach, 1, reach * 2);
     }
   }
+}
+
+/**
+ * The RGB palette. Zoomed in, each pixel is interpolated between its two
+ * columns, so the tags' 32 heights do not draw as a staircase. Zoomed out,
+ * the scrolling waveform averages its columns, as the CDJ's does, which keeps
+ * the gaps between the beats; the overview keeps each span's peak.
+ *
+ * The scrolling tag's colour is the channels squared, then scaled to full
+ * brightness: low red, mid green, high blue, as rekordbox's manual has it,
+ * with the strongest band clearly on top instead of a pastel mix of all three.
+ */
+function drawSmoothRgb(
+  ctx: CanvasRenderingContext2D,
+  data: Uint8Array,
+  width: number,
+  height: number,
+  detail: boolean,
+  half: HalfWaveform,
+  inset: { top: number; bottom: number },
+): void {
+  const stride = strideOf("rgb", detail);
+  const columns = Math.floor(data.length / stride);
+  const read = detail ? colourDetailColumn : colourColumn;
+  const step = columns / width;
+
+  const top = Math.max(0, Math.min(inset.top, height / 2 - 1));
+  const bottom = Math.max(0, Math.min(inset.bottom, height / 2 - 1));
+  const usable = Math.max(1, height - top - bottom);
+  const floor = height - bottom;
+  const centre = top + usable / 2;
+  for (let x = 0; x < width; x++) {
+    let tall: number;
+    let r: number;
+    let g: number;
+    let b: number;
+    if (step < 1) {
+      const pos = Math.max(0, (x + 0.5) * step - 0.5);
+      const i = Math.min(Math.floor(pos), columns - 1);
+      const one = read(data, i * stride);
+      const two = read(data, Math.min(i + 1, columns - 1) * stride);
+      const t = pos - i;
+      const mix = (k: number) => (one[k] ?? 0) * (1 - t) + (two[k] ?? 0) * t;
+      [tall, r, g, b] = [mix(0), mix(1), mix(2), mix(3)];
+    } else {
+      const first = Math.floor(x * step);
+      const last = Math.min(columns, Math.max(first + 1, Math.floor((x + 1) * step)));
+      let peak = 0;
+      let sum = 0;
+      r = 0;
+      g = 0;
+      b = 0;
+      for (let i = first; i < last; i++) {
+        const [h, cr, cg, cb] = read(data, i * stride);
+        peak = Math.max(peak, h);
+        sum += h;
+        r += cr;
+        g += cg;
+        b += cb;
+      }
+      const n = Math.max(last - first, 1);
+      tall = detail ? sum / n : peak;
+      [r, g, b] = [r / n, g / n, b / n];
+    }
+    if (tall <= 0) {
+      ctx.fillStyle = bandColour(BAND_LOW | BAND_HIGH);
+      ctx.fillRect(x, half ? floor : centre, 1, 1);
+      continue;
+    }
+    ctx.fillStyle = detail ? rgbOf(r * r, g * g, b * b) : overviewColour(r, g, b);
+    if (half) {
+      const h = Math.max(1, Math.min(tall, 1) * usable);
+      ctx.fillRect(x, floor - h, 1, h);
+    } else {
+      const reach = Math.max(0.5, Math.min(tall, 1) * (usable / 2));
+      ctx.fillRect(x, centre - reach, 1, reach * 2);
+    }
+  }
+}
+
+/**
+ * `PWV4`'s colour bytes drawn to match `PWV5`'s on the same stretch of music.
+ * Its channels are flatter and its mid runs high, so green swamped the blue of
+ * a breakdown. Fitted on 20,374 stretches of 120 rekordbox-analysed tracks
+ * against the scrolling colour as drawn (squared): mid ×0.6, then a 1.5 power,
+ * which cuts the mismatch by a quarter against the bytes as they are.
+ */
+function overviewColour(r: number, g: number, b: number): string {
+  return rgbOf(r ** 1.5, (g * 0.6) ** 1.5, b ** 1.5);
 }
 
 /**

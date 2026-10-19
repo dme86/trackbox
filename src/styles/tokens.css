@@ -208,6 +208,7 @@
   --s-player-gutter-h: 4px; /* user adjustment: increase the black gap below the player by 1px from the measured 3px */
   --s-player-transport-w: 80px; /* measured from a 2x capture of rekordbox 7.2.11 running; transport column x 0..80pt */
   --s-player-right-w: 209px; /* measured from a 2x capture of rekordbox 7.2.11 running; memory/hotcue panel x 1711..1920pt */
+  --s-player-right-w-shared: 281px; /* UNMEASURED — the same panel beside each of two stacked decks, widened so the eight pads are big enough to hit */
   --s-player-margin: 2px; /* black around the deck column, so it reads as a panel rather than as the whole strip */
   --s-player-inset: 12px; /* the deck's left inset; the rows had 16 on the left, 12 on the right, and the detail none at all */
   --s-player-zoom-inset: 8px; /* how far the zoom cluster floats in from the left edge of the detail waveform it sits over */
@@ -259,6 +260,8 @@
   --s-mixer-fader-handle-w: 28px; /* measured from the 2-player capture docs/screenshots (rekordbox 7.2.11, 2x): the handle x 82.5..110.5pt */
   --s-mixer-fader-handle-h: 3px; /* measured from the 2-player capture docs/screenshots (rekordbox 7.2.11, 2x): the handle y 265..268pt */
   --s-player-dual-h: 420px; /* measured from the 2-player capture docs/screenshots (rekordbox 7.2.11, 2x): the two-deck band y 56.5..476.5pt, mirrored about its own centre at 266.5 */
+  --s-player-vertical-min-h: 435px; /* Trackbox PERFORMANCE: the least two side-by-side decks with rotated waveforms fit their controls in */
+  --s-browse-min-h: 150px; /* Trackbox: what dragging the decks taller always leaves the browser — its header and a few rows */
   --s-menu-row-h: 25px; /* the layout menu open in a capture of rekordbox 7.2.11 at 2x: five rows on a 50px pitch inside a 258px panel */
   --s-player-simple-h: 59px; /* the simple player capture docs/screenshots (Screenshot 2026-09-09 at 9.03.41 PM, rekordbox 7.2.11, 2x): the strip y 188..306 under the top bar, a 1pt black line and then the 58pt panel row; the 3pt gutter to the browser follows */
   --s-player-simple-top-gap: 1px; /* the simple player capture docs/screenshots (Screenshot 2026-09-09 at 9.03.41 PM, rekordbox 7.2.11, 2x): black y 188..190 between the top bar and the panel row */

@@ -139,6 +139,8 @@ export interface Layout {
   order: ColumnKey[];
   /** Width overrides. A key absent here uses the catalogue width. */
   widths: Partial<Record<ColumnKey, number>>;
+  /** Headings the user renamed. A key absent here uses the catalogue name. */
+  labels?: Partial<Record<ColumnKey, string>>;
 }
 
 export function defaultLayout(): Layout {
@@ -198,7 +200,19 @@ export function resolve(layout: Layout): ColumnSpec[] {
   return [...FIXED, ...chosen]
     .map((key) => specOf(key))
     .filter((spec): spec is ColumnSpec => spec !== undefined)
-    .map((spec) => ({ ...spec, width: widthOf(layout, spec.key) }));
+    .map((spec) => ({ ...spec, label: layout.labels?.[spec.key] ?? spec.label, width: widthOf(layout, spec.key) }));
+}
+
+/** The longest heading a column can be renamed to. */
+export const MAX_COLUMN_LABEL = 40;
+
+/** Renames a column's heading; an empty name gives it its own back. */
+export function renameColumn(layout: Layout, key: ColumnKey, label: string): Layout {
+  const name = label.trim().slice(0, MAX_COLUMN_LABEL);
+  const labels = { ...layout.labels };
+  if (name === "" || name === specOf(key)?.label) delete labels[key];
+  else labels[key] = name;
+  return { ...layout, labels };
 }
 
 /**
@@ -294,7 +308,15 @@ export function sanitise(value: unknown, fallback: () => Layout = defaultLayout)
       Math.min(Math.max(width, MIN_COLUMN_WIDTH), MAX_COLUMN_WIDTH),
     );
   }
-  return { order: withTitle(order), widths };
+  const labels: Partial<Record<ColumnKey, string>> = {};
+  const rawLabels = typeof raw.labels === "object" && raw.labels !== null ? raw.labels : {};
+  for (const [key, label] of Object.entries(rawLabels)) {
+    if (!AVAILABLE_COLUMNS.includes(key as ColumnKey) || typeof label !== "string") continue;
+    const name = label.trim().slice(0, MAX_COLUMN_LABEL);
+    if (name !== "") labels[key as ColumnKey] = name;
+  }
+  const ordered = withTitle(order);
+  return Object.keys(labels).length > 0 ? { order: ordered, widths, labels } : { order: ordered, widths };
 }
 
 /** A rendered heading's horizontal extent, in any one coordinate space. */

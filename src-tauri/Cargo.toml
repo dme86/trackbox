@@ -36,6 +36,7 @@ rbl-anlz = { path = "../crates/rbl-anlz" }
 rbl-analysis = { path = "../crates/rbl-analysis" }
 rbl-audio = { path = "../crates/rbl-audio" }
 rbl-deck = { path = "../crates/rbl-deck" }
+rbl-control = { path = "../crates/rbl-control" }
 rbl-prolink = { path = "../crates/rbl-prolink" }
 rbl-link = { path = "../crates/rbl-link" }
 rbl-export = { path = "../crates/rbl-export" }
@@ -55,6 +56,8 @@ minisign-verify = "0.2"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"
 time = { version = "0.3", features = ["formatting"] }
+# The local date and time in a recording's file name.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Error and panic reporting only.  Keep optional telemetry features off.
 # rustls, not native-tls: the default `transport` feature pulls in openssl on
 # Linux, which collides with rusqlite's bundled-sqlcipher-vendored-openssl and
@@ -95,6 +98,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "std", "NSAppleEventDescriptor", "NSArray", "NSClassDescription", "NSDictionary", "NSEnumerator", "NSObjCRuntime", "NSScriptClassDescription",
   "NSScriptCommand", "NSScriptCommandDescription", "NSScriptObjectSpecifiers", "NSScriptStandardSuiteCommands",
   "NSString", "NSURL", "NSValue",
+  # `controller.rs`: App Nap held off while a DJ controller is connected.
+  "NSProcessInfo",
 ] }
 
 [target.'cfg(windows)'.dependencies]

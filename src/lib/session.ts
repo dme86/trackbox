@@ -16,7 +16,7 @@
  * between runs, a stored width can come from a wider screen, and a hand-edited
  * value can be anything at all; none of those may produce a broken window.
  */
-import { asLayout, type PlayerLayout } from "./layout";
+import { asLayout, DECK_ARRANGEMENTS, type DeckArrangement, type PlayerLayout } from "./layout";
 import { DETAIL_BARS, ZOOM_STEPS } from "./player";
 import type { RowDto, SortColumn, TreeNode } from "@/ipc/types";
 import { DEFAULT_SORT, type SortState } from "./viewSpec";
@@ -70,7 +70,11 @@ export interface Session {
   waveformZoom: { a: number; b: number };
   /** Whether DUAL CONTROL, which links both decks' zoom and beat jump, was on. */
   dualControl: boolean;
+  /** Deck heights dragged taller, before clamping; absent is the layout's own. */
+  deckHeights: DeckHeights;
 }
+
+export type DeckHeights = Partial<Record<DeckArrangement, number>>;
 
 /**
  * Explicit folder choices in the main library tree.
@@ -112,6 +116,7 @@ export const DEFAULT_SESSION: Session = {
   trafficLight: "master",
   waveformZoom: { a: DETAIL_BARS, b: DETAIL_BARS },
   dualControl: false,
+  deckHeights: {},
 };
 
 /** Every sort column, so a new one cannot be left out of what is restored. */
@@ -141,6 +146,19 @@ function widthOrDefault(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.round(value)
     : fallback;
+}
+
+function deckHeightsOrDefault(value: unknown): DeckHeights {
+  if (typeof value !== "object" || value === null) return {};
+  const raw = value as Partial<Record<DeckArrangement, unknown>>;
+  const heights: DeckHeights = {};
+  for (const arrangement of DECK_ARRANGEMENTS) {
+    const height = raw[arrangement];
+    if (typeof height === "number" && Number.isFinite(height) && height > 0) {
+      heights[arrangement] = Math.round(height);
+    }
+  }
+  return heights;
 }
 
 /** A zoom is one of the discrete steps the waveform controls can select. */
@@ -210,6 +228,7 @@ export function sanitiseSession(value: unknown): Session {
           }
         : { a: DETAIL_BARS, b: DETAIL_BARS },
     dualControl: raw.dualControl === true,
+    deckHeights: deckHeightsOrDefault(raw.deckHeights),
   };
 }
 

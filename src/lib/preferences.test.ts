@@ -55,6 +55,19 @@ describe("sanitisePreferences", () => {
     expect(sanitisePreferences({ analysis: { firstBeatCue: true } }).analysis.firstBeatCue).toBe(true);
   });
 
+  it("keeps the jog wheels in vinyl mode unless the store plainly says not to", () => {
+    expect(DEFAULT_PREFERENCES.audio.jogVinyl).toBe(true);
+    expect(sanitisePreferences({ audio: {} }).audio.jogVinyl).toBe(true);
+    expect(sanitisePreferences({ audio: { jogVinyl: "no" } }).audio.jogVinyl).toBe(true);
+    expect(sanitisePreferences({ audio: { jogVinyl: false } }).audio.jogVinyl).toBe(false);
+  });
+
+  it("keeps a known SMART CFX kind and falls back to echo", () => {
+    expect(DEFAULT_PREFERENCES.audio.smartCfxKind).toBe("echo");
+    expect(sanitisePreferences({ audio: { smartCfxKind: "noise" } }).audio.smartCfxKind).toBe("noise");
+    expect(sanitisePreferences({ audio: { smartCfxKind: "flanger" } }).audio.smartCfxKind).toBe("echo");
+  });
+
   it("keeps the browser key-sort choice and preserves the old display-based ordering", () => {
     expect(sanitisePreferences({view: {keySort: "musical"}}).view.keySort).toBe("musical");
     expect(sanitisePreferences({view: {keySort: "invalid"}}).view.keySort).toBe("alphabetical");
@@ -154,6 +167,12 @@ describe("formatKey", () => {
     // A key the wheel does not know is shown as it is, not hidden.
     expect(formatKey("Unknown", "alphanumeric")).toBe("Unknown");
     expect(formatKey("", "alphanumeric")).toBe("");
+  });
+
+  it("shows a library that stores Camelot codes in the chosen notation too", () => {
+    expect(formatKey("8A", "classic")).toBe("Am");
+    expect(formatKey("8A", "alphanumeric")).toBe("8A");
+    expect(formatKey("Unknown", "classic")).toBe("Unknown");
   });
 });
 

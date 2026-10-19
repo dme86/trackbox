@@ -12,11 +12,12 @@
 //! frame counter. Sixty ticks a second per deck would be pure IPC churn, and
 //! the interface would still have to interpolate to draw a smooth playhead.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use rbl_deck::{Deck, DeckEvent, Engine, Render, Sink, StreamWish};
+use rbl_deck::{Deck, DeckError, DeckEvent, Engine, Render, Sink, StreamWish};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -29,6 +30,9 @@ const METER_TICK: Duration = Duration::from_millis(33);
 
 /// Meter ticks to a deck tick, so both come off one thread.
 const TICKS_PER_DECK_TICK: u32 = 3;
+
+/// Meter ticks between two control-latency lines in the log: ten seconds.
+const TICKS_PER_LATENCY_LOG: u32 = 300;
 
 /// One deck in a tick.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -127,6 +131,10 @@ pub struct MeterDto {
     /// How far the limiter turned the sum down since the last tick, in dB;
     /// 0 when it did nothing.
     pub reduction: f32,
+    /// Each channel's peak since the last tick, A then B: after trim, EQ and
+    /// filter, before the channel fader and crossfader, as a DJM's channel
+    /// meter reads. Its own slot, so the controller's LEDs keep theirs.
+    pub channel_peaks: [f32; 2],
 }
 
 /// What a deck reports outside the tick.
@@ -165,6 +173,13 @@ pub struct Player {
     /// The sample rate and buffer size the interface asked for. Like the
     /// device, a change drops the engine and the next play opens with it.
     wish: Mutex<StreamWish>,
+    /// Whether the headphones are routed by the device: separate outputs on
+    /// a controller known to have them, none elsewhere. On by default, so a
+    /// DDJ-FLX4 chosen as the output just works.
+    cue_auto: Mutex<bool>,
+    /// The mixer as the last engine left it, for the next one to start from.
+    mixer: rbl_deck::MixerSettings,
+    fx: rbl_deck::FxSettings,
     /// The metronome's click and volume as the interface last set them,
     /// held for the same reason the limiter is.
     metronome: Mutex<(rbl_deck::ClickSound, rbl_deck::ClickVolume)>,
@@ -201,10 +216,13 @@ impl Player {
             loaded_tracks: Mutex::new(std::collections::HashMap::new()),
             device: Mutex::new(None),
             wish: Mutex::new(StreamWish::default()),
+            cue_auto: Mutex::new(true),
+            mixer: rbl_deck::MixerSettings::default(),
+            fx: rbl_deck::FxSettings::default(),
             metronome: Mutex::new((rbl_deck::ClickSound::Two, rbl_deck::ClickVolume::Large)),
             limiter: Mutex::new(LimiterDto {
                 input_gain_db: rbl_deck::DEFAULT_INPUT_GAIN_DB,
-                enabled: false,
+                enabled: true,
                 ceiling_db: rbl_deck::DEFAULT_CEILING_DB,
                 release_ms: rbl_deck::DEFAULT_RELEASE_MS,
             }),
@@ -231,17 +249,57 @@ fn limiter_of(settings: &rbl_deck::LimiterSettings) -> LimiterDto {
     }
 }
 
+/// Where the headphones go when they follow the device: a DDJ-FLX4's own
+/// interface has them on outputs 3/4; anything else has none.
+fn auto_cue_routing(device: Option<&str>) -> rbl_deck::CueRouting {
+    let name = match device {
+        Some(id) => rbl_deck::output_devices().into_iter().find(|d| d.id == id).map(|d| d.name),
+        None => rbl_deck::default_output_device().map(|d| d.name),
+    };
+    if name.is_some_and(|name| rbl_control::flx4::is_audio_device(&name)) {
+        rbl_deck::CueRouting::Lanes { master: (0, 1), cue: (2, 3) }
+    } else {
+        rbl_deck::CueRouting::Off
+    }
+}
+
 impl Player {
     /// The engine, opening the audio device on first use.
     ///
     /// Opening it is what makes noise possible, so it happens when a deck is
     /// asked to do something and not before. The stream itself stays paused
     /// until something plays.
+    ///
+    /// An engine whose output went away is replaced here, on the next thing
+    /// asked of it: on the same device, never another one. While that device
+    /// is still missing the old engine is kept — decks stopped, tracks and
+    /// positions intact — and the caller gets the error. Once it is back the
+    /// new engine is empty, and `deck:reset` has the interface reload both
+    /// decks where they were, as a device change does.
     pub fn engine<R: Runtime>(&self, app: &AppHandle<R>) -> AppResult<Arc<Engine>> {
         let mut held = self.engine.lock();
-        if let Some(engine) = held.as_ref() {
-            return Ok(Arc::clone(engine));
+        let replacing_lost = match held.as_ref() {
+            Some(engine) if !engine.device_lost() => return Ok(Arc::clone(engine)),
+            Some(engine) => {
+                stop_on_loss(engine);
+                self.mixer.copy_from(engine.mixer());
+                self.fx.copy_from(engine.fx());
+                true
+            }
+            None => false,
+        };
+        let engine = Arc::new(self.build(app)?);
+        *held = Some(Arc::clone(&engine));
+        drop(held);
+        if replacing_lost && self.emits_deck_events {
+            if let Err(e) = app.emit("deck:reset", ()) {
+                tracing::warn!(error = %e, "the deck reset did not reach the interface");
+            }
         }
+        Ok(engine)
+    }
+
+    fn build<R: Runtime>(&self, app: &AppHandle<R>) -> AppResult<Engine> {
         let handle = app.clone();
         let emits = self.emits_deck_events;
         let events: rbl_deck::EventSink = Arc::new(move |event: DeckEvent| {
@@ -250,19 +308,30 @@ impl Player {
             }
         });
         let device = self.device.lock().clone();
-        let wish = *self.wish.lock();
-        let engine = Engine::with_sink(|render| (self.open_sink)(render, device, wish), &events).map_err(|e| {
-            AppError::new(ErrorKind::Internal, "The audio device could not be opened.")
-                .with_detail(e.to_string())
+        let mut wish = *self.wish.lock();
+        if *self.cue_auto.lock() {
+            wish.cue = auto_cue_routing(device.as_deref());
+        }
+        let engine = Engine::with_sink(|render| (self.open_sink)(render, device, wish), &events).map_err(|e| match e {
+            DeckError::Disconnected(_) => AppError::new(
+                ErrorKind::NotFound,
+                "The chosen audio output is not connected. Reconnect it, or choose another output in Preferences › Audio.",
+            )
+            .with_detail(e.to_string()),
+            _ => AppError::new(ErrorKind::Internal, "The audio device could not be opened.").with_detail(e.to_string()),
         })?;
         // What the interface asked for, before the first callback runs.
         Self::apply_limiter(engine.limiter(), *self.limiter.lock());
+        engine.mixer().copy_from(&self.mixer);
+        engine.fx().copy_from(&self.fx);
+        // The tempo fader moves the speed and holds the key until the deck says otherwise.
+        for deck in Deck::ALL {
+            engine.set_master_tempo(deck, true);
+        }
         engine.master().set_gain(*self.master_level.lock());
         let (sound, volume) = *self.metronome.lock();
         engine.metronome().set_sound(sound);
         engine.metronome().set_volume(volume);
-        let engine = Arc::new(engine);
-        *held = Some(Arc::clone(&engine));
         Ok(engine)
     }
 
@@ -322,7 +391,7 @@ impl Player {
         drop(current);
         // Dropped rather than replaced: whatever is playing is on the old
         // device, and the next play opens the new one.
-        self.engine.lock().take().is_some()
+        self.drop_engine()
     }
 
     pub fn device(&self) -> Option<String> {
@@ -338,11 +407,34 @@ impl Player {
         }
         *current = wish;
         drop(current);
-        self.engine.lock().take().is_some()
+        self.drop_engine()
     }
 
     pub fn wish(&self) -> StreamWish {
         *self.wish.lock()
+    }
+
+    /// Drops the engine so the next play opens the device afresh, keeping
+    /// its mixer for the next one. Whether there was one.
+    fn drop_engine(&self) -> bool {
+        let taken = self.engine.lock().take();
+        if let Some(engine) = taken.as_ref() {
+            self.mixer.copy_from(engine.mixer());
+            self.fx.copy_from(engine.fx());
+        }
+        taken.is_some()
+    }
+
+    /// Whether the headphones follow the device. A change drops the engine,
+    /// as a wish does.
+    pub fn set_cue_auto(&self, auto: bool) -> bool {
+        let mut current = self.cue_auto.lock();
+        if *current == auto {
+            return false;
+        }
+        *current = auto;
+        drop(current);
+        self.drop_engine()
     }
 
     /// The metronome's click and volume, now if the engine is up and at its
@@ -360,9 +452,114 @@ impl Player {
         self.engine.lock().clone()
     }
 
+    /// The mixer the next engine starts from; the live one is the engine's.
+    pub fn kept_mixer(&self) -> &rbl_deck::MixerSettings {
+        &self.mixer
+    }
+
     pub fn ticking(&self) -> &std::sync::atomic::AtomicBool {
         &self.ticking
     }
+
+    /// Starts recording the master into `folder` (or the default one) and
+    /// reports on it as `record:status` until it ends.
+    pub fn start_recording<R: Runtime>(&self, app: &AppHandle<R>, folder: Option<PathBuf>) -> AppResult<RecordingDto> {
+        let engine = self.engine(app)?;
+        let folder = folder.or_else(default_recording_folder).ok_or_else(|| {
+            AppError::new(ErrorKind::NotFound, "There is no folder to record into. Choose one in Preferences › Audio.")
+        })?;
+        std::fs::create_dir_all(&folder).map_err(|e| {
+            AppError::new(ErrorKind::NotFound, "The recordings folder could not be created.").with_detail(e.to_string())
+        })?;
+        let path = recording_path(&folder);
+        engine.start_recording(&path).map_err(|e| {
+            AppError::new(ErrorKind::Internal, "The recording could not be started.").with_detail(e.to_string())
+        })?;
+        let weak = Arc::downgrade(&engine);
+        let handle = app.clone();
+        let spawned = std::thread::Builder::new().name("record-status".to_owned()).spawn(move || loop {
+            std::thread::sleep(RECORD_STATUS_EVERY);
+            let Some(engine) = weak.upgrade() else {
+                // The engine went with its device; dropping it finished the file.
+                let _ = handle.emit(
+                    "record:status",
+                    RecordingDto::ended("The audio output changed, so the recording was stopped and saved."),
+                );
+                break;
+            };
+            let Some(status) = engine.recording_status() else { break };
+            let _ = handle.emit("record:status", RecordingDto::from(&status));
+            if !status.active {
+                break;
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "no status thread for the recording");
+        }
+        engine
+            .recording_status()
+            .map(|status| RecordingDto::from(&status))
+            .ok_or_else(|| AppError::internal("a started recording has no status"))
+    }
+
+    /// Stops the recording, if one runs, and finishes the file.
+    pub fn stop_recording<R: Runtime>(&self, app: &AppHandle<R>) -> Option<RecordingDto> {
+        let status = self.opened()?.stop_recording().map(|status| RecordingDto::from(&status))?;
+        let _ = app.emit("record:status", &status);
+        Some(status)
+    }
+
+    pub fn recording_status(&self) -> Option<RecordingDto> {
+        self.opened()?.recording_status().map(|status| RecordingDto::from(&status))
+    }
+}
+
+const RECORD_STATUS_EVERY: Duration = Duration::from_millis(500);
+
+/// A recording, for the interface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingDto {
+    pub path: String,
+    pub seconds: f64,
+    pub dropped_frames: u64,
+    pub error: Option<String>,
+    pub active: bool,
+}
+
+impl RecordingDto {
+    fn ended(error: &str) -> Self {
+        Self { path: String::new(), seconds: 0.0, dropped_frames: 0, error: Some(error.to_owned()), active: false }
+    }
+}
+
+impl From<&rbl_deck::RecordingStatus> for RecordingDto {
+    fn from(status: &rbl_deck::RecordingStatus) -> Self {
+        Self {
+            path: status.path.display().to_string(),
+            seconds: status.seconds,
+            dropped_frames: status.dropped_frames,
+            error: status.error.clone(),
+            active: status.active,
+        }
+    }
+}
+
+fn default_recording_folder() -> Option<PathBuf> {
+    let music = dirs::audio_dir().or_else(|| dirs::home_dir().map(|home| home.join("Music")))?;
+    Some(music.join("Trackbox Recordings"))
+}
+
+/// `Trackbox 2026-10-18 21-30-05.flac`, numbered if that second is taken.
+fn recording_path(folder: &Path) -> PathBuf {
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
+    let mut path = folder.join(format!("Trackbox {stamp}.flac"));
+    let mut n = 2;
+    while path.exists() {
+        path = folder.join(format!("Trackbox {stamp} ({n}).flac"));
+        n += 1;
+    }
+    path
 }
 
 fn emit_deck_event<R: Runtime>(app: &AppHandle<R>, event: &DeckEvent) {
@@ -393,6 +590,17 @@ fn emit_deck_event<R: Runtime>(app: &AppHandle<R>, event: &DeckEvent) {
     }
 }
 
+/// Both decks stopped where they are, so the transport tells the truth about
+/// a device that went away mid-set. Nothing is moved to another output.
+fn stop_on_loss(engine: &Engine) {
+    if engine.any_playing() {
+        tracing::error!("the audio output went away; both decks stopped");
+    }
+    for deck in Deck::ALL {
+        engine.pause(deck);
+    }
+}
+
 /// Starts the ticker if one is not already running.
 ///
 /// It stops after a short RMS tail when neither deck is playing nor scrubbing.
@@ -409,17 +617,41 @@ pub fn start_ticker<R: Runtime>(app: &AppHandle<R>) {
     let spawned = std::thread::Builder::new().name("rbl-deck-tick".to_owned()).spawn(move || {
         let mut since_deck_tick = 0_u32;
         let mut silent_ticks = 0_u32;
+        let mut since_latency_log = 0_u32;
+        let mut latency_logged = 0_u64;
         loop {
             std::thread::sleep(METER_TICK);
             let player = handle.state::<Arc<Player>>();
             let Some(engine) = player.opened() else { break };
+            if engine.device_lost() && engine.any_playing() {
+                stop_on_loss(&engine);
+                let _ = handle.emit(
+                    "audio:device-lost",
+                    "The audio output went away; both decks stopped. Reconnect it, or choose another output in Preferences › Audio.",
+                );
+            }
+            since_latency_log += 1;
+            if since_latency_log >= TICKS_PER_LATENCY_LOG {
+                since_latency_log = 0;
+                let latency = engine.control_latency();
+                if latency.count != latency_logged {
+                    latency_logged = latency.count;
+                    tracing::debug!(
+                        last_ms = latency.last.as_secs_f64() * 1e3,
+                        max_ms = latency.max.as_secs_f64() * 1e3,
+                        count = latency.count,
+                        "mixer control latency"
+                    );
+                }
+            }
             let master = engine.master();
             let (peak_left, peak_right) = master.peaks();
             let reduction = master.reduction_db();
             let (rms_left, rms_right) = master.rms();
+            let channel_peaks = engine.mixer().channels.each_ref().map(rbl_deck::ChannelSettings::take_meter);
             if let Err(e) = handle.emit(
                 "deck:meters",
-                MeterDto { peak_left, peak_right, rms_left, rms_right, master: master.gain(), reduction },
+                MeterDto { peak_left, peak_right, rms_left, rms_right, master: master.gain(), reduction, channel_peaks },
             ) {
                 tracing::warn!(error = %e, "a meter tick did not reach the interface");
             }
@@ -532,7 +764,7 @@ mod tests {
     #[test]
     fn a_new_player_carries_the_engine_s_limiter_defaults() {
         let limiter = Player::default().limiter();
-        assert!(!limiter.enabled);
+        assert!(limiter.enabled);
         assert_eq!(limiter.input_gain_db, rbl_deck::DEFAULT_INPUT_GAIN_DB);
         assert_eq!(limiter.ceiling_db, rbl_deck::DEFAULT_CEILING_DB);
         assert_eq!(limiter.release_ms, rbl_deck::DEFAULT_RELEASE_MS);
@@ -579,5 +811,82 @@ mod tests {
         // The cap on an event payload is 1 KB; this carries both decks.
         let json = serde_json::to_string(&TickDto::silent()).unwrap();
         assert!(json.len() < 1_024, "a tick was {} bytes", json.len());
+    }
+
+    /// Half a second of a steady level, 16-bit stereo.
+    fn steady_wav(path: &std::path::Path) {
+        let (rate, frames) = (44_100_u32, 22_050_u32);
+        let data = frames * 4;
+        let mut wav = Vec::new();
+        for chunk in [&b"RIFF"[..], &(36 + data).to_le_bytes(), b"WAVEfmt ", &16_u32.to_le_bytes(),
+            &1_u16.to_le_bytes(), &2_u16.to_le_bytes(), &rate.to_le_bytes(), &(rate * 4).to_le_bytes(),
+            &4_u16.to_le_bytes(), &16_u16.to_le_bytes(), b"data", &data.to_le_bytes()]
+        {
+            wav.extend_from_slice(chunk);
+        }
+        for _ in 0..frames * 2 {
+            wav.extend_from_slice(&8_000_i16.to_le_bytes());
+        }
+        std::fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn a_lost_output_stops_the_decks_and_is_reopened_only_when_it_is_back() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tauri::Listener;
+
+        let connected = Arc::new(AtomicBool::new(true));
+        let sinks: Arc<Mutex<Vec<Arc<rbl_deck::NullSink>>>> = Arc::default();
+        let (plugged, opened) = (Arc::clone(&connected), Arc::clone(&sinks));
+        let player = Player::with_sink(Box::new(move |render, device, _| {
+            if !plugged.load(Ordering::SeqCst) {
+                return Err(DeckError::Disconnected(device.unwrap_or_default()));
+            }
+            let sink = Arc::new(rbl_deck::NullSink::new(44_100, render));
+            opened.lock().push(Arc::clone(&sink));
+            Ok(sink as Arc<dyn Sink>)
+        }));
+        player.set_cue_auto(false);
+        player.set_device(Some("flx4".to_owned()));
+        let app = tauri::test::mock_app();
+        let resets = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&resets);
+        app.listen("deck:reset", move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steady.wav");
+        steady_wav(&path);
+        let first = player.engine(app.handle()).unwrap();
+        first.load(Deck::A, &path);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !first.snapshot().a.loaded {
+            assert!(std::time::Instant::now() < deadline, "the deck never loaded");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        first.play(Deck::A);
+        assert!(first.any_playing());
+
+        // Unplugged mid-set, and still unplugged at the next press.
+        connected.store(false, Ordering::SeqCst);
+        sinks.lock()[0].lose();
+        let Err(refused) = player.engine(app.handle()) else { panic!("opened a device that is not there") };
+        assert!(refused.message.contains("not connected"), "{}", refused.message);
+        assert!(!first.any_playing(), "both decks stop rather than play on into nothing");
+        let kept = player.opened().unwrap();
+        assert!(Arc::ptr_eq(&kept, &first), "the stopped engine keeps its tracks");
+        assert!(kept.snapshot().a.loaded);
+        assert_eq!(sinks.lock().len(), 1, "nothing else was opened");
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+
+        // Plugged back in: the next press opens it, and the interface reloads.
+        connected.store(true, Ordering::SeqCst);
+        let second = player.engine(app.handle()).unwrap();
+        assert!(!Arc::ptr_eq(&second, &first));
+        assert!(!second.device_lost());
+        assert_eq!(sinks.lock().len(), 2);
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&player.engine(app.handle()).unwrap(), &second), "and then it is kept");
     }
 }

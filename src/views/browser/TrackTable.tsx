@@ -34,13 +34,15 @@ import { FilterIcon, SortDownIcon, SortUpIcon } from "@/components/icons";
 import { Artwork } from "@/components/Artwork";
 import { RatingStar } from "@/components/RatingStar";
 import { RecordIcon } from "@/components/icons";
-import { EXTRA_COLUMNS, reorderTarget, type ColumnKey, type ColumnSpec } from "@/lib/columns";
+import { EXTRA_COLUMNS, MAX_COLUMN_LABEL, reorderTarget, type ColumnKey, type ColumnSpec } from "@/lib/columns";
 import { COLOR_NAMES } from "@/lib/trackFilter";
 import { browseListVars, browseScale, formatKey } from "@/lib/preferences";
 import { trafficLightLit, type TrafficLightReach } from "@/lib/camelot";
 import { TickIcon } from "@/components/icons";
 import type { TrafficLightSource } from "@/lib/session";
 import { usePreferences, useTooltip } from "@/store/usePreferences";
+import { useTranslation } from "@/i18n";
+import { useControllerIntent } from "@/store/useControllerIntent";
 import type { KeyDisplay } from "@/ipc/types";
 import { ColumnMenu } from "./ColumnMenu";
 import { setRowDragImage } from "./dragGhost";
@@ -764,10 +766,14 @@ export interface TrackTableProps {
   onColumnMove: (key: ColumnKey, to: number) => void;
   onColumnResize: (key: ColumnKey, width: number) => void;
   onColumnToggle: (key: ColumnKey) => void;
+  /** Renames a heading; an empty name restores the column's own. */
+  onColumnRename?: (key: ColumnKey, label: string) => void;
   onColumnAutoSize: (key: ColumnKey) => void;
   onColumnAutoSizeAll: () => void;
   /** The row the player should show, as the selection moves. */
   onFocusedRow?: (row: RowDto | null) => void;
+  /** The controller's BROWSE knob turns this list's cursor. */
+  browseFocus?: boolean;
   /**
    * The single selected row, or `null` when the selection is not one row.
    *
@@ -911,8 +917,8 @@ const TRAFFIC_SOURCES: readonly { id: TrafficLightSource; label: string; short: 
 
 export const TrackTable = memo(function TrackTable({
   spec, onSortChange, onSelectionChange, title, query, onQueryChange, searchRef, searchField = "all", onSearchFieldChange,
-  columns, onColumnMove, onColumnResize, onColumnToggle, onColumnAutoSize,
-  onColumnAutoSizeAll, onFocusedRow, onDragTracks, dragging = false, onDropTracks, onDropFiles, onDragError, onRate, onComment, onReorder, onEditField, onEditBlocked, seed, onFirstRows,
+  columns, onColumnMove, onColumnResize, onColumnToggle, onColumnRename, onColumnAutoSize,
+  onColumnAutoSizeAll, onFocusedRow, browseFocus = false, onDragTracks, dragging = false, onDropTracks, onDropFiles, onDragError, onRate, onComment, onReorder, onEditField, onEditBlocked, seed, onFirstRows,
   libraryGeneration, pendingEdits, pendingRows = 0, onSelectedTracks, onAnalyse,
   onShowInformation, onShowInFinder, onRemoveFromPlaylist, onRemoveFromHistory, onResetPlayCount,
   onRemoveFromCollection, onAutoRelocate, onRelocate, onConvertMemoryCues, readOnly = false,
@@ -926,6 +932,7 @@ export const TrackTable = memo(function TrackTable({
   const preferences = usePreferences();
   const { keyDisplay, previewCueMarkers, tooltips } = preferences.view;
   const tip = useTooltip();
+  const t = useTranslation();
   // The Key cell's list, fetched the first time one opens so the table does
   // not ask for it at startup.
   const [keyChoices, setKeyChoices] = useState<readonly string[] | null>(null);
@@ -988,6 +995,7 @@ export const TrackTable = memo(function TrackTable({
   const [selection, setSelection] = useState<SelectionState>(emptySelection);
   const [dragKey, setDragKey] = useState<ColumnKey | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; target: ColumnKey } | null>(null);
+  const [renamingColumn, setRenamingColumn] = useState<ColumnKey | null>(null);
   // Live during a header-edge drag. A ref, not state: this updates per
   // mousemove and re-rendering the table on each would be a frame's work.
   const resizing = useRef<{ key: ColumnKey; x: number; width: number } | null>(null);
@@ -1068,6 +1076,8 @@ export const TrackTable = memo(function TrackTable({
     // this far down it. Without this the virtualizer's idea of which rows are
     // visible is a header's worth out.
     scrollMargin: COL_HEADER_H,
+    // And a row scrolled to from above lands under the header, not behind it.
+    scrollPaddingStart: COL_HEADER_H,
   });
 
   // A new row height throws away what the virtualizer measured at the old one.
@@ -1189,6 +1199,13 @@ export const TrackTable = memo(function TrackTable({
       window.removeEventListener("keydown", onKey);
     };
   }, [platform, selection.anchorIndex, firstIndex, rowH, view, view.count, moveCursor, preferences.keyboard.overrides]);
+
+  // A controller's BROWSE knob walks the same cursor the arrow keys do.
+  useControllerIntent((intent) => {
+    if (!browseFocus || intent.type !== "browse" || view.count === 0) return;
+    const start = firstIndex < 0 ? 0 : firstIndex;
+    moveCursor(selection.anchorIndex === null ? start : selection.anchorIndex + intent.steps);
+  });
 
   const startDragOut = useCallback(
     (row: RowDto) => {
@@ -1560,7 +1577,28 @@ export const TrackTable = memo(function TrackTable({
           }}
           role="columnheader"
         >
-          {col.label}
+          {renamingColumn === col.key && onColumnRename ? (
+            <input
+              className={styles.headInput}
+              aria-label={t("Rename {column}", { column: col.label })}
+              defaultValue={col.label}
+              maxLength={MAX_COLUMN_LABEL}
+              placeholder="Empty: the column's own name"
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") setRenamingColumn(null);
+              }}
+              onBlur={(e) => {
+                if (renamingColumn === col.key) onColumnRename(col.key, e.currentTarget.value);
+                setRenamingColumn(null);
+              }}
+            />
+          ) : col.label}
           {sortIndicator(col)}
           {/*
             The resize grip. Its own mousedown stops the header's click, so
@@ -1580,7 +1618,7 @@ export const TrackTable = memo(function TrackTable({
           />
         </div>
       )),
-    [columns, spec.sort, onSortChange, sortIndicator, dragKey],
+    [columns, spec.sort, onSortChange, sortIndicator, dragKey, renamingColumn, onColumnRename, t],
   );
 
   return (
@@ -1721,7 +1759,8 @@ export const TrackTable = memo(function TrackTable({
 
       {filterOpen ? filterBar : null}
 
-      <div className={styles.scroll} ref={scrollRef} data-testid="track-scroll" role="grid" aria-rowcount={view.count}>
+      <div className={styles.scroll} ref={scrollRef} data-testid="track-scroll" role="grid" aria-rowcount={view.count}
+        data-browse-focus={browseFocus || undefined}>
         {/*
           Inside the scroller, not above it. As a sibling it stayed put while
           the rows moved sideways, so every column sheared away from its own
@@ -1916,6 +1955,7 @@ export const TrackTable = memo(function TrackTable({
           onToggle={onColumnToggle}
           onAutoSize={onColumnAutoSize}
           onAutoSizeAll={onColumnAutoSizeAll}
+          onRename={onColumnRename ? setRenamingColumn : undefined}
           onClose={() => setMenu(null)}
         />
       ) : null}

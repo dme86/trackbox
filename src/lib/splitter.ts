@@ -66,6 +66,15 @@ export function subBounds(available: number): SplitterBounds {
   };
 }
 
+/**
+ * The gutter under the decks, between them and the browser. The floor is the
+ * arrangement's own height, so no deck is squeezed below the layout its
+ * controls were measured at; the browser keeps its header and a few rows.
+ */
+export function deckBounds(available: number, floor: number, browseMin: number): SplitterBounds {
+  return { available, min: floor, maxFraction: 0.85, minOther: browseMin };
+}
+
 /** The splitter inside the sub-browser, between its tree and its list. */
 export function subTreeBounds(available: number): SplitterBounds {
   return { ...TREE_BOUNDS, available };

@@ -75,7 +75,9 @@ pub struct LimiterSettings {
 impl Default for LimiterSettings {
     fn default() -> Self {
         Self {
-            enabled: AtomicBool::new(false),
+            // On: two decks at full scale sum to twice what the device takes,
+            // and off the clamp flat-tops them.
+            enabled: AtomicBool::new(true),
             input_gain_db: AtomicU32::new(DEFAULT_INPUT_GAIN_DB.to_bits()),
             ceiling_db: AtomicU32::new(DEFAULT_CEILING_DB.to_bits()),
             release_ms: AtomicU32::new(DEFAULT_RELEASE_MS.to_bits()),

@@ -63,6 +63,20 @@
   text-overflow: ellipsis;
 }
 
+.titleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.titleRow .title { min-width: 0; }
+.originalBpm {
+  flex: none;
+  font-size: var(--f-size-sm);
+  color: var(--c-simple-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Two rows of three columns: the readouts fill the left of the second row,
    KEY SYNC and BEAT SYNC take the two right columns of the first, and the key
    shift and MASTER sit under them. */

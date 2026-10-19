@@ -15,7 +15,7 @@ import type { Limiter } from "@/ipc/types";
 const STORAGE_KEY = "rbl.limiter.v1";
 
 /** The engine's own defaults, restated so a first run shows them at once. */
-export const DEFAULT_LIMITER: Limiter = { enabled: false, inputGainDb: -4, ceilingDb: 0, releaseMs: 250 };
+export const DEFAULT_LIMITER: Limiter = { enabled: true, inputGainDb: -4, ceilingDb: 0, releaseMs: 250 };
 
 /** The ranges the engine accepts; anything outside is clamped by it too. */
 export const INPUT_GAIN_DB = { min: -24, max: 24, step: 0.1 } as const;

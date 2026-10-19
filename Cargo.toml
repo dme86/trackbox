@@ -58,6 +58,12 @@ strip = "symbols"
 # SQLCipher, symphonia and the DSP crates are unusable in a debug build otherwise.
 opt-level = 2
 
+# `"*"` above does not cover workspace members. The engine runs the audio
+# callback, the stretchers and the vendored Rubber Band (built by its build
+# script at this level), and unoptimised it cannot keep a short ring full.
+[profile.dev.package.rbl-deck]
+opt-level = 3
+
 [profile.perf]
 inherits = "release"
 debug = 1

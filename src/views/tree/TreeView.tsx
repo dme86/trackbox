@@ -18,7 +18,8 @@ import {
   branchIds, childrenOf, containerOf, emptySources, newlyClosed, nodesForSource, sourceOf,
   subtreeIds, toggle, visibleNodes, searchTree, type TreeSearchScope, type Source,
 } from "@/lib/tree";
-import { SourceRail } from "./SourceRail";
+import { SourceRail, RAIL_SOURCES } from "./SourceRail";
+import { useControllerIntent } from "@/store/useControllerIntent";
 import { browseListVars } from "@/lib/preferences";
 import { usePreferences } from "@/store/usePreferences";
 import type { TreeExpansion } from "@/lib/session";
@@ -393,6 +394,8 @@ export interface TreeViewProps {
   onDeviceDelete?: (node: TreeNode) => void;
   ejectingDeviceId?: string | null;
   deviceBusy?: boolean;
+  /** Where the controller's BROWSE knob turns, when it is on this tree. */
+  browseFocus?: "rail" | "tree" | null;
 }
 
 export const TreeView = memo(function TreeView({
@@ -403,7 +406,7 @@ export const TreeView = memo(function TreeView({
   onCreateSmartPlaylist, onEditSmartPlaylist, onAddArtwork, onAddToShortcut, onSortItems,
   railShortcuts, onOpenShortcut, onDeleteShortcut,
   onEjectDevice, ejectingDeviceId, deviceBusy = false,
-  onDeviceCreate, onDeviceRename, onDeviceDelete,
+  onDeviceCreate, onDeviceRename, onDeviceDelete, browseFocus = null,
 }: TreeViewProps) {
   const { advanced: { doubleClickToEdit }, view } = usePreferences();
   // Browse › FontSize and Line Space apply to the tree as they do the list.
@@ -580,8 +583,31 @@ export const TreeView = memo(function TreeView({
     row?.scrollIntoView({ block: "start" });
   }, [selectedId]);
 
+  // The controller's BROWSE knob: round the rail's sections, or down the
+  // tree's rows; SHIFT and a press opens or closes the folder it is on.
+  useControllerIntent((intent) => {
+    if (browseFocus === "rail" && intent.type === "browse") {
+      const sources = RAIL_SOURCES.filter((id) => !empty.has(id));
+      const at = Math.max(sources.indexOf(source), 0);
+      const next = sources[Math.min(Math.max(at + intent.steps, 0), sources.length - 1)];
+      if (next !== undefined && next !== source) jumpTo(next);
+    } else if (browseFocus === "tree" && intent.type === "browse") {
+      const rows = visible.filter((node) => node.kind !== "note");
+      const at = rows.findIndex((node) => node.id === selectedId);
+      const next = rows[Math.min(Math.max(at + intent.steps, 0), rows.length - 1)];
+      if (next && next.id !== selectedId) onSelect(next);
+    } else if (browseFocus === "tree" && intent.type === "browsePress" && intent.shift) {
+      const node = visible.find((candidate) => candidate.id === selectedId);
+      if (node && branches.has(node.id)) onToggle(node);
+    }
+  });
+  useEffect(() => {
+    if (browseFocus !== "tree") return;
+    list.current?.querySelector<HTMLElement>("[data-selected]")?.scrollIntoView({ block: "nearest" });
+  }, [selectedId, browseFocus]);
+
   return (
-    <nav className={styles.tree} aria-label="Library">
+    <nav className={styles.tree} aria-label="Library" data-browse-focus={browseFocus ?? undefined}>
       <SourceRail
         selected={source}
         onSelect={jumpTo}

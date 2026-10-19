@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rbl_deck::{Deck, DeckEvent, Engine, Render, Sink};
+use rbl_deck::{Deck, DeckEvent, Engine, PadFxKind, Render, Sink, SmartCfxKind};
 
 const RATE: u32 = 44_100;
 const BUFFER: usize = 512;
@@ -79,6 +79,8 @@ static ALLOCATOR: Counting = Counting;
 struct Watched {
     render: Mutex<Render>,
     buffer: Mutex<Vec<f32>>,
+    /// Headphones too, so the cue path is counted along with the master.
+    cue: Mutex<Vec<f32>>,
     running: Mutex<bool>,
 }
 
@@ -87,6 +89,7 @@ impl Watched {
         Self {
             render: Mutex::new(render),
             buffer: Mutex::new(vec![0.0; BUFFER * 2]),
+            cue: Mutex::new(vec![0.0; BUFFER * 2]),
             running: Mutex::new(false),
         }
     }
@@ -94,11 +97,12 @@ impl Watched {
     /// One callback's worth, counting what it allocated.
     fn pull(&self, count_it: bool) -> usize {
         let mut buffer = self.buffer.lock().unwrap();
+        let mut cue = self.cue.lock().unwrap();
         let mut render = self.render.lock().unwrap();
         buffer.fill(0.0);
         COUNT.with(|c| c.set(0));
         WATCHING.with(|w| w.set(count_it));
-        render(&mut buffer);
+        render(&mut buffer, &mut cue);
         WATCHING.with(|w| w.set(false));
         COUNT.with(Cell::get)
     }
@@ -183,13 +187,34 @@ fn the_audio_callback_allocates_nothing() {
     }
 
     // And then it must never allocate again, whatever the transport does.
+    let mixer = engine.mixer();
+    let pad = |kind| mixer.channels[0].set_pad_fx(Some((kind, 1.0)), 100.0);
     let mut worst = 0;
     for i in 0..200 {
         match i {
             40 => engine.seek_frames(Deck::A, u64::from(RATE) * 2),
+            // PAD FX, one after another and let go, and SMART CFX through its kinds.
+            50 => pad(PadFxKind::Roll),
+            53 => pad(PadFxKind::Echo),
+            56 => pad(PadFxKind::Trans),
+            59 => pad(PadFxKind::Hpf),
+            62 => pad(PadFxKind::Lpf),
+            65 => pad(PadFxKind::Crush),
+            68 => pad(PadFxKind::Reverb),
+            71 => mixer.channels[0].set_pad_fx(None, 100.0),
+            72 => mixer.set_smart_cfx_on(true),
+            73 => mixer.channels[0].set_filter(0.9),
+            75 => mixer.set_smart_cfx_kind(SmartCfxKind::Noise),
+            77 => mixer.set_smart_cfx_kind(SmartCfxKind::Crush),
+            79 => mixer.set_smart_cfx_kind(SmartCfxKind::Reverb),
             80 => engine.pause(Deck::A),
             100 => engine.play(Deck::A),
             140 => engine.master().set_gain(0.3),
+            145 => engine.mixer().channels[0].set_filter(0.2),
+            147 => engine.fx().set_on(true),
+            148 => engine.fx().set_kind(rbl_deck::FxKind::Reverb),
+            150 => engine.mixer().channels[0].set_cue(true),
+            155 => engine.mixer().set_headphone_mix(0.2),
             160 => engine.mixer().set_crossfade(0.8),
             // The tempo control puts a stretcher in the path, which is the
             // most likely place for a buffer to be grown mid-track.

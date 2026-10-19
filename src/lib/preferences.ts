@@ -12,9 +12,9 @@
  */
 import { ANALYSIS_SLOTS, SLOTS } from "./queue";
 import type { KeyChord } from "./shortcuts";
-import { toCamelot, type TrafficLightReach } from "./camelot";
+import { fromCamelot, toCamelot, type TrafficLightReach } from "./camelot";
 import type {
-  KeyDisplay, MenuSlot, OverviewWaveform, WaveformColor, WaveformPosition,
+  KeyDisplay, MenuSlot, OverviewWaveform, SmartCfxKind, WaveformColor, WaveformPosition,
 } from "@/ipc/types";
 
 /** BEAT SYNC matches the tempo and the bar; BPM SYNC the tempo alone. */
@@ -160,7 +160,27 @@ export interface AudioPreferences {
   bufferSize: number;
   metronomeSound: MetronomeSound;
   metronomeVolume: MetronomeVolume;
+  /**
+   * Where the headphones are heard: `auto` uses a DDJ-FLX4's outputs 3/4 when
+   * it is the output device, `lanes` is outputs 3/4 on any device, `split` is
+   * cue left and master right on a stereo one.
+   */
+  headphones: HeadphoneRouting;
+  /** What the bottom of a band's travel is: EQ (−26 dB) or ISOLATOR (silence). */
+  eqCurve: "eq" | "isolator";
+  /** Off is THRU: both decks at their channel faders, whatever the crossfader. */
+  crossfader: boolean;
+  /** A controller's jog platter scratches when touched (vinyl); off, it only bends (CDJ). */
+  jogVinyl: boolean;
+  /** What SMART CFX adds to the filter on the CFX knobs; on/off is per session. */
+  smartCfxKind: SmartCfxKind;
+  /** Where mix recordings go; null is Music › Trackbox Recordings. */
+  recordingFolder: string | null;
 }
+
+export type HeadphoneRouting = "auto" | "off" | "split" | "lanes";
+export const HEADPHONE_ROUTINGS: readonly HeadphoneRouting[] = ["auto", "off", "split", "lanes"];
+export const SMART_CFX_KINDS: readonly SmartCfxKind[] = ["echo", "reverb", "noise", "crush"];
 
 export type AnalysisMode = "rekordbox" | "rbxport";
 
@@ -304,6 +324,12 @@ export const DEFAULT_PREFERENCES: Preferences = {
     bufferSize: 512,
     metronomeSound: 2,
     metronomeVolume: "large",
+    headphones: "auto",
+    eqCurve: "eq",
+    crossfader: true,
+    jogVinyl: true,
+    smartCfxKind: "echo",
+    recordingFolder: null,
   },
   analysis: {
     mode: "rbxport",
@@ -346,11 +372,12 @@ export const DEFAULT_PREFERENCES: Preferences = {
   },
 };
 
-/** `Ebm` as the library stores it, or `2A` when the window says Alphanumeric. */
+/** `Ebm` or `2A` as the window's key display says, whichever the library stores. */
 export function formatKey(key: string, display: KeyDisplay): string {
-  if (display !== "alphanumeric" || key === "") return key;
+  if (key === "") return key;
   // A key the wheel does not know — a blank, "Unknown", a typo — is shown as
   // it is rather than hidden.
+  if (display === "classic") return fromCamelot(key) || key;
   return toCamelot(key) || key;
 }
 
@@ -477,6 +504,13 @@ export function sanitisePreferences(value: unknown): Preferences {
       bufferSize: oneOfNumber(audio.bufferSize, BUFFER_SIZES, d.audio.bufferSize),
       metronomeSound: oneOfNumber(audio.metronomeSound, METRONOME_SOUNDS, d.audio.metronomeSound),
       metronomeVolume: oneOf(audio.metronomeVolume, METRONOME_VOLUMES, d.audio.metronomeVolume),
+      headphones: oneOf(audio.headphones, HEADPHONE_ROUTINGS, d.audio.headphones),
+      eqCurve: oneOf(audio.eqCurve, ["eq", "isolator"] as const, d.audio.eqCurve),
+      crossfader: bool(audio.crossfader, d.audio.crossfader),
+      jogVinyl: bool(audio.jogVinyl, d.audio.jogVinyl),
+      smartCfxKind: oneOf(audio.smartCfxKind, SMART_CFX_KINDS, d.audio.smartCfxKind),
+      recordingFolder:
+        typeof audio.recordingFolder === "string" && audio.recordingFolder !== "" ? audio.recordingFolder : null,
     },
     analysis: {
       mode: oneOf(analysis.mode, ["rekordbox", "rbxport"], d.analysis.mode),

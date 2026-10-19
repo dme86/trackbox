@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { asLayout, deckCount, isFullDeck, LAYOUTS, layoutLabel } from "./layout";
+import { asLayout, deckArrangement, deckCount, isFullDeck, LAYOUTS, layoutLabel } from "./layout";
+
+describe("deckArrangement", () => {
+  it("gives every full deck band its own height and the others none", () => {
+    expect(deckArrangement("one", false)).toBe("one");
+    expect(deckArrangement("two", false)).toBe("two");
+    expect(deckArrangement("two", true)).toBe("vertical");
+    expect(deckArrangement("simple", false)).toBeNull();
+    expect(deckArrangement("browser", false)).toBeNull();
+  });
+});
 
 describe("deckCount", () => {
   it("counts the decks each layout draws", () => {

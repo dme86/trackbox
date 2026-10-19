@@ -16,6 +16,7 @@ import {
   MAX_COLUMN_WIDTH,
   MIN_COLUMN_WIDTH,
   moveColumn,
+  renameColumn,
   resizeColumn,
   resolve,
   sanitise,
@@ -328,5 +329,17 @@ describe("reorderTarget", () => {
 
   it("never moves in front of the fixed columns", () => {
     expect(reorderTarget(spans, 1, -40, 88, 1)).toBe(1);
+  });
+});
+
+describe("renamed headings", () => {
+  it("show the user's name, survive a reload, and an empty name restores the column's own", () => {
+    const renamed = renameColumn(defaultLayout(), "bpm", "  Tempo  ");
+    expect(resolve(renamed).find((c) => c.key === "bpm")?.label).toBe("Tempo");
+    const stored = JSON.stringify(renamed);
+    const reloaded = sanitise(JSON.parse(stored));
+    expect(reloaded.labels).toEqual({ bpm: "Tempo" });
+    const restored = renameColumn(reloaded, "bpm", "");
+    expect(resolve(restored).find((c) => c.key === "bpm")?.label).toBe(specOf("bpm")?.label);
   });
 });

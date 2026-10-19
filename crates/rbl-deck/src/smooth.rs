@@ -55,7 +55,6 @@ impl Smoothed {
     }
 
     /// Where it is now, without moving it.
-    #[cfg_attr(not(test), allow(dead_code, reason = "read by the smoothing tests"))]
     pub fn value(self) -> f32 {
         self.at
     }

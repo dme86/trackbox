@@ -33,10 +33,18 @@ mod deck;
 /// Streaming decoder, also used by the close-zoom PCM waveform command.
 pub mod decode;
 mod fade;
+/// The mix recording's encoder.
+pub mod flac;
+mod fx;
+mod latency;
+pub use latency::ControlLatency;
 mod limiter;
 mod metronome;
 mod meter;
 mod mixer;
+mod padfx;
+mod record;
+pub use record::{RecordingStatus, RECORD_SECONDS_BUFFERED};
 #[cfg(feature = "rubberband")]
 mod rubberband;
 mod scrub;
@@ -47,7 +55,7 @@ mod smooth;
 mod stretch;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use rtrb::Consumer;
@@ -55,7 +63,8 @@ use rtrb::Consumer;
 pub use clock::{DeckClock, DeckSnapshot};
 pub use fade::FADE_FRAMES;
 pub use sink::{
-    default_output_device, output_devices, AudioDevice, CpalSink, NullSink, Render, Sink, StreamWish,
+    default_output_device, output_devices, AudioDevice, CpalSink, CueRouting, NullSink, Render, Sink,
+    StreamWish,
 };
 
 use block::{Block, RING_BLOCKS};
@@ -67,7 +76,9 @@ pub use limiter::{
     MAX_CEILING_DB, MAX_INPUT_GAIN_DB, MAX_RELEASE_MS, MIN_CEILING_DB, MIN_INPUT_GAIN_DB, MIN_RELEASE_MS,
 };
 pub use metronome::{ClickSound, ClickVolume, GridBeat, Metronome, MetronomeSettings};
-pub use mixer::{Band, Channel, Curve, Fade, MixerSettings};
+pub use fx::{BeatFx, FxKind, FxSettings, FxTarget};
+pub use mixer::{Band, Channel, ChannelSettings, Curve, Fade, MixerSettings};
+pub use padfx::{PadFxKind, SmartCfxKind};
 #[cfg(feature = "rubberband")]
 pub use rubberband::RubberBand;
 pub use stretch::{Stretcher, Varispeed, Wsola, MAX_RATIO, MIN_RATIO};
@@ -84,6 +95,10 @@ const MIX_FRAMES: usize = 4096;
 pub enum DeckError {
     #[error("there is no audio output device")]
     NoDevice,
+    /// The output that was chosen is not connected. Never answered with
+    /// another output.
+    #[error("the chosen audio output is not connected: {0}")]
+    Disconnected(String),
     #[error("the audio device could not be used: {0}")]
     Device(String),
     #[error("unsupported or unreadable audio: {0}")]
@@ -282,6 +297,10 @@ pub struct Engine {
     limiter: Arc<LimiterSettings>,
     metronome: Arc<MetronomeSettings>,
     metronomes: [Arc<Metronome>; 2],
+    fx: Arc<FxSettings>,
+    recorder: record::Recorder,
+    /// Whether the sink was last asked to start rather than stop.
+    streaming: AtomicBool,
 }
 
 impl Engine {
@@ -292,9 +311,9 @@ impl Engine {
 
     /// The same, on a chosen output.
     ///
-    /// `device` is an id from `output_devices`. One that is not there any more
-    /// falls back to the default, because an unplugged interface should not be
-    /// a silent app.
+    /// `device` is an id from `output_devices`. One that is not there is
+    /// `DeckError::Disconnected` rather than the default: a set must not move
+    /// to the laptop's speakers because an interface was unplugged.
     pub fn on_device(events: &EventSink, device: Option<String>) -> Result<Self> {
         Self::with_sink(
             move |render| Ok(Arc::new(CpalSink::open_named(render, device)?) as Arc<dyn Sink>),
@@ -339,6 +358,11 @@ impl Engine {
         let strip = Arc::clone(&mixer);
         let limiter = Arc::new(LimiterSettings::default());
         let limiting = Arc::clone(&limiter);
+        let fx = Arc::new(FxSettings::default());
+        let effecting = Arc::clone(&fx);
+        // Built at the first callback, with the rate: its delay lines are
+        // a number of frames.
+        let mut beat_fx: Option<BeatFx> = None;
         // The metronome: settings shared by both decks, a grid and a switch
         // per deck, and the clicks in flight owned by the callback.
         let metronome = Arc::new(MetronomeSettings::default());
@@ -362,19 +386,40 @@ impl Engine {
         // callback, because the device's rate is not known until the sink is
         // open and the sink is opened with this closure.
         let mut level: Option<Smoothed> = None;
+        // HEADPHONES MIX, cue side and master side, built at the first
+        // callback for the same reason as `level`.
+        let mut phones_level: Option<(Smoothed, Smoothed)> = None;
         let mut rms = meter::WindowRms::new();
-        let render: Render = Box::new(move |out: &mut [f32]| {
+        let (mut tap, recorder) = record::channel();
+        let render: Render = Box::new(move |out: &mut [f32], cue: &mut [f32]| {
+            // First, so every control read below is at least as new as what
+            // was measured.
+            strip.observe_latency();
             let rate = mixing.rate();
             rms.set_rate(rate);
             let channels =
                 channels.get_or_insert_with(|| [Channel::new(rate), Channel::new(rate)]);
+            let beat_fx = beat_fx.get_or_insert_with(|| BeatFx::new(rate));
             let curve = strip.curve();
+            let smart = strip.smart_cfx();
+            let beat_ms = effecting.beat_ms();
             let (fade_a, fade_b) = strip.fader();
+            // A sink without headphones hands over an empty cue buffer, and
+            // then none of the cue path runs.
+            let phones = !cue.is_empty() && cue.len() == out.len();
+            if phones {
+                cue.fill(0.0);
+            }
             // Each deck through its own strip and then summed, which is what a
             // mixer is: a per-channel EQ applied to the sum would be one EQ.
             let target = mixing.gain();
             let level = level.get_or_insert_with(|| Smoothed::new(target, mixing.rate()));
+            let mut at = 0;
             for chunk in out.chunks_mut(MIX_FRAMES * 2) {
+                let span = at..at + chunk.len();
+                at += chunk.len();
+                let cue_chunk: &mut [f32] =
+                    if phones { cue.get_mut(span).unwrap_or(&mut []) } else { &mut [] };
                 let Some(buffer) = scratch.get_mut(..chunk.len()) else { continue };
                 let Some(click_buffer) = click_scratch.get_mut(..chunk.len()) else { continue };
                 click_buffer.fill(0.0);
@@ -387,9 +432,17 @@ impl Engine {
                     let after = reader.clock.position();
                     let fader = if i == 0 { fade_a } else { fade_b };
                     let Some(settings) = strip.channels.get(i) else { continue };
+                    // SMART CFX and PAD FX in the strip, so the cue hears them.
+                    channel.process_strip_with_fx(buffer, settings, curve, smart, beat_ms);
+                    // The channel's level before its fader, for a controller's meter.
+                    settings.report_level(buffer.iter().fold(0.0_f32, |peak, s| peak.max(s.abs())));
+                    // Pre-fader listen: after trim and EQ, before the channel
+                    // fader and the crossfader, as a DJM's CUE taps it.
+                    channel.send_cue(buffer, cue_chunk, settings.cue());
                     // The post-EQ channel fader shares the existing per-frame
                     // smoothing with the crossfader. No callback allocations.
-                    channel.process(buffer, settings, curve, fader * settings.volume());
+                    channel.apply_fader(buffer, fader * settings.volume());
+                    beat_fx.process(buffer, &effecting, if i == 0 { FxTarget::A } else { FxTarget::B });
                     // The click after the strip, so an EQ cut does not muffle
                     // it, and only while the deck is playing: a scrub crosses
                     // beats too, and nobody wants it clicking.
@@ -404,6 +457,7 @@ impl Engine {
                 }
                 // The master level over the music, then the clicks on top at
                 // their own volume, whatever the knob says.
+                beat_fx.process(chunk, &effecting, FxTarget::Master);
                 for (frame, click) in chunk.chunks_exact_mut(2).zip(click_buffer.chunks_exact(2)) {
                     let gain = level.step(target);
                     for (sample, add) in frame.iter_mut().zip(click.iter()) {
@@ -443,6 +497,28 @@ impl Engine {
             mixing.rms_left.store(rms_left.to_bits(), Ordering::Relaxed);
             mixing.rms_right.store(rms_right.to_bits(), Ordering::Relaxed);
             mixing.report(left, right);
+            tap.push(out);
+            // The headphones: the cue sum against the master as the device is
+            // given it, so the master is never touched by what is cued.
+            if phones {
+                let (cue_gain, master_gain) = strip.headphone_split();
+                // Nothing cued is nothing on the headphones, whatever the MIX
+                // says: the master is the room's, not the DJ's ears'. MASTER
+                // CUE puts it on the cue side as well.
+                let master_cued = strip.master_cue();
+                let any_cued = master_cued || strip.channels.iter().any(ChannelSettings::cue);
+                let master_gain = if any_cued { master_gain } else { 0.0 };
+                let cue_gain_master = if master_cued { cue_gain } else { 0.0 };
+                let (hp_cue, hp_master) = phones_level
+                    .get_or_insert_with(|| (Smoothed::new(cue_gain, rate), Smoothed::new(master_gain, rate)));
+                for (heard, main) in cue.chunks_exact_mut(2).zip(out.chunks_exact(2)) {
+                    let c = hp_cue.step(cue_gain) * mixer::CUE_HEADROOM;
+                    let m = hp_master.step(master_gain + cue_gain_master);
+                    for (sample, master) in heard.iter_mut().zip(main.iter()) {
+                        *sample = mixer::soft_clip(*sample * c + *master * m);
+                    }
+                }
+            }
         });
 
         let sink = open(render)?;
@@ -465,11 +541,45 @@ impl Engine {
         let decks: [deck::DeckHandle; 2] = handles
             .try_into()
             .map_err(|_| DeckError::Device("could not start both decks".to_owned()))?;
-        Ok(Self { decks, sink, sample_rate, master, mixer, limiter, metronome, metronomes })
+        Ok(Self {
+            decks,
+            sink,
+            sample_rate,
+            master,
+            mixer,
+            limiter,
+            metronome,
+            metronomes,
+            fx,
+            recorder,
+            streaming: AtomicBool::new(false),
+        })
+    }
+
+    /// BEAT FX: the effect, where it is inserted, and how much of it.
+    pub fn fx(&self) -> &Arc<FxSettings> {
+        &self.fx
     }
 
     /// Device callback deadlines, without opening or polling the device.
-    pub fn audio_health(&self) -> AudioHealth { self.sink.health() }
+    pub fn audio_health(&self) -> AudioHealth {
+        let starved = self.decks.iter().map(|deck| deck.clock().starved()).sum();
+        AudioHealth { starved, ..self.sink.health() }
+    }
+
+    /// Whether the output has gone away under the engine. Nothing plays again
+    /// until a new engine is built; this one does not move to another device.
+    pub fn device_lost(&self) -> bool {
+        self.sink.lost()
+    }
+
+    /// Mixer control stored → start of the first callback that renders it.
+    pub fn control_latency(&self) -> ControlLatency {
+        self.mixer.control_latency()
+    }
+
+    /// Where the headphones went when the device was opened.
+    pub fn cue_routing(&self) -> CueRouting { self.sink.cue_routing() }
 
     /// The metronome's click and volume, shared by both decks.
     pub fn metronome(&self) -> &Arc<MetronomeSettings> {
@@ -512,6 +622,14 @@ impl Engine {
     pub fn set_tempo(&self, deck: Deck, tempo: f32) {
         if let Some(handle) = self.decks.get(deck.index()) {
             handle.send(deck::Command::SetTempo(tempo));
+        }
+    }
+
+    /// A jog's pitch bend: 1.0 is none, 1.02 is two percent fast for as long
+    /// as it is held. The tempo readout and sync keep the unbent tempo.
+    pub fn set_bend(&self, deck: Deck, bend: f32) {
+        if let Some(handle) = self.decks.get(deck.index()) {
+            handle.send(deck::Command::SetBend(bend));
         }
     }
 
@@ -803,12 +921,39 @@ impl Engine {
         self.settle_device();
     }
 
+    /// Starts recording the master to a new FLAC file at `path`. The device
+    /// keeps running while it records, so pauses are in the file as silence.
+    pub fn start_recording(&self, path: &Path) -> Result<()> {
+        self.recorder
+            .start(path, self.sample_rate)
+            .map_err(|e| DeckError::Device(format!("could not start recording to {}: {e}", path.display())))?;
+        self.settle_device();
+        Ok(())
+    }
+
+    /// Stops recording and finishes the file.
+    pub fn stop_recording(&self) -> Option<RecordingStatus> {
+        let status = self.recorder.stop();
+        self.settle_device();
+        status
+    }
+
+    /// The recording running now, or the last one.
+    pub fn recording_status(&self) -> Option<RecordingStatus> {
+        self.recorder.status()
+    }
+
     /// Starts the device when a deck needs it and stops it when neither does.
     ///
     /// A stream that is left running costs a callback every 11 ms for silence,
     /// which is exactly the sort of idle cost the budget rules out.
     fn settle_device(&self) {
-        let wanted = self.any_sounding();
+        let wanted = self.any_sounding() || self.recorder.armed();
+        if wanted && !self.streaming.swap(true, Ordering::AcqRel) {
+            self.mixer.forget_pending();
+        } else if !wanted {
+            self.streaming.store(false, Ordering::Release);
+        }
         let result = if wanted { self.sink.start() } else { self.sink.stop() };
         if let Err(e) = result {
             tracing::error!(error = %e, "the audio device would not change state");
@@ -928,6 +1073,7 @@ impl DeckReader {
         let frames = out.len() / 2;
         let mut position = self.clock.position();
         let mut done = 0;
+        let mut starved = false;
         while done < frames {
             // Faded out and the clock has moved on: this is where a seek, a
             // cue or a beat jump actually takes effect, with nothing sounding
@@ -949,6 +1095,10 @@ impl DeckReader {
                 // milliseconds of a held sample decaying is inaudible, and the
                 // step it replaces is not. The playhead does not move for it:
                 // no audio from the track was played.
+                starved |= !changing
+                    && self.clock.playing()
+                    && !self.clock.scrubbing()
+                    && !self.clock.end_of_stream();
                 if self.ramp.silent_now() {
                     if changing {
                         self.adopt(target);
@@ -1001,6 +1151,9 @@ impl DeckReader {
         }
 
         self.clock.set_position(position);
+        if starved {
+            self.clock.note_starved();
+        }
 
         // Ran dry with nothing more coming: the track has ended. An underrun
         // that is not the end leaves the deck playing and writes silence,

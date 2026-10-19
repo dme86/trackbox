@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { clampWidth, fit, subBounds, subTreeBounds, TREE_BOUNDS, type SplitterBounds } from "./splitter";
+import { clampWidth, deckBounds, fit, subBounds, subTreeBounds, TREE_BOUNDS, type SplitterBounds } from "./splitter";
+
+describe("deckBounds", () => {
+  it("never squeezes the decks below their own height", () => {
+    expect(clampWidth(100, deckBounds(900, 420, 150))).toBe(420);
+  });
+
+  it("always leaves the browser its rows", () => {
+    expect(clampWidth(5000, deckBounds(900, 420, 150))).toBe(750);
+  });
+
+  it("keeps a height that fits", () => {
+    expect(clampWidth(600, deckBounds(900, 420, 150))).toBe(600);
+  });
+});
 
 const wide: SplitterBounds = { ...TREE_BOUNDS, available: 1800 };
 

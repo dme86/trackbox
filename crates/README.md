@@ -18,6 +18,7 @@ These crates are independent of Tauri; application coordination belongs in
 | [rbl-audio](rbl-audio/README.md) | Audio decoding and export compatibility. |
 | [rbl-analysis](rbl-analysis/README.md) | Offline tempo, grid, key, and waveform DSP. |
 | [rbl-deck](rbl-deck/README.md) | Two-deck playback and real-time audio. |
+| [rbl-control](rbl-control/README.md) | DJ controller MIDI decoding and LED encoding (DDJ-FLX4). |
 | [rbl-backup](rbl-backup/README.md) | Backup archives and recoverable restore. |
 | [rbl-devices](rbl-devices/README.md) | Volume discovery, inspection, and eject. |
 

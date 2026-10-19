@@ -1,0 +1,20 @@
+[package]
+name = "rbl-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DJ controllers: MIDI decoded into mixer and deck intents, and deck state encoded into LEDs."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# The capture example talks to real ports; the crate itself never does.
+[target.'cfg(any(target_os = "macos", windows))'.dev-dependencies]
+midir = "0.11"

@@ -9,7 +9,7 @@
 /* Sharing a transport column with the other deck leaves this one two columns:
    the waveforms and the panel beside them. */
 .player[data-shared] {
-  grid-template-columns: 1fr var(--s-player-right-w);
+  grid-template-columns: 1fr var(--s-player-right-w-shared);
   /* Its height comes from the row it is in, which is half the pair's band. */
   height: 100%;
   min-height: 0;
@@ -637,6 +637,19 @@
 }
 .detail canvas { width: 100%; height: 100%; display: block; }
 
+/* A fine line where the two stacked decks' waveforms meet, on their shared baseline. */
+.player[data-dual]:not([data-flipped]):not([data-orientation="vertical"]) .detailRow::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--c-outline);
+  pointer-events: none;
+}
+
 /* The waveform, the grid and the cue markers, drawn wider than the strip and
    slid under the fixed playhead by a transform. Sliding is the compositor's
    work; redrawing is not, which is why only one of the two happens per frame. */
@@ -667,22 +680,55 @@
    things the arrow keys are about to move. */
 .player[data-armed] .playhead { background: var(--c-playhead-armed); }
 
+/* The whole track's head has to be found at a glance: two points wide with a
+   dark edge, a notch above it, and what has played dimmed behind it. */
+.overviewHead {
+  z-index: 2;
+  width: 2px;
+  margin-left: -1px;
+  box-shadow: 0 0 0 1px var(--c-black);
+}
+.overviewHead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 100%;
+  width: 100vw;
+  background: color-mix(in srgb, var(--c-black) 45%, transparent);
+}
+.overviewHead::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  translate: -50% 0;
+  border: 5px solid transparent;
+  border-bottom: 0;
+  border-top-color: var(--c-text);
+}
+.player[data-armed] .overviewHead::after { border-top-color: var(--c-playhead-armed); }
+
 /* Cues sit over the waveform, the grid and the bar count — a marker behind a
    downbeat line is a marker nobody can find. A hot cue sits over a memory cue:
    rekordbox keeps one beside each hot cue, and the user's crop shows the badge
    covering the red triangle's point. */
 /* A loop is a band over the waveform: a stored memory loop dim, the deck's
-   own lit while it plays, in the pad blue the AU button lights with. */
+   own lit while it plays, in the orange rekordbox draws a loop in, with its
+   in and out points edged so the active one reads at a glance. */
 .loopBand {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: var(--c-pad-active);
+  background: var(--c-cue-orange);
   opacity: 0.18;
   pointer-events: none;
   z-index: 1;
 }
-.loopBand[data-active] { opacity: 0.38; }
+.loopBand[data-active] {
+  opacity: 0.45;
+  box-shadow: inset 2px 0 0 var(--c-cue-orange), inset -2px 0 0 var(--c-cue-orange);
+}
 
 .memoryCue,
 .hotCue {
@@ -1062,6 +1108,16 @@ button.pageNumber:disabled { color: var(--c-icon-off); }
 .pageNumber:hover:not(:disabled) { background: #383838; }
 .pageNumber[data-on]:hover:not(:disabled) { background: #4a82ed; }
 
+/* SHIFT+LOOP IN or OUT: the loop end the jog moves blinks, as the deck's LED
+   does. By label, so DualDeck's IN and OUT blink the same way. */
+.player[data-loop-adjust="in"] button[aria-label="Loop in"],
+.player[data-loop-adjust="out"] button[aria-label="Loop out"] { animation: loopAdjust 1s steps(1) infinite; }
+@keyframes loopAdjust { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .player[data-loop-adjust="in"] button[aria-label="Loop in"],
+  .player[data-loop-adjust="out"] button[aria-label="Loop out"] { animation: none; outline: 1px solid var(--c-pad-active); }
+}
+
 .padMenu {
   border: 0;
   background: none;
@@ -1082,7 +1138,16 @@ button.pageNumber:disabled { color: var(--c-icon-off); }
   /* The panel's own grey, measured: the list's boxes sit on it. */
   background: var(--c-panel);
   border-left: 1px solid var(--c-panel);
+  container-type: inline-size;
 }
+/* The pads stop growing once they are square, and the tabs follow them rather
+   than the panel's far edge. Deck B, read bottom-up, keeps them at its bottom;
+   side by side, both decks keep them at the top. */
+.side[data-panel="pads"] {
+  grid-template-rows: minmax(0, max-content) auto;
+  align-content: start;
+}
+.player[data-flipped]:not([data-orientation="vertical"]) .side[data-panel="pads"] { align-content: end; }
 
 /* Measured off the capture's MEMORY list: boxes on the panel, a point of
    panel between them, five points of panel above the first. */
@@ -1116,22 +1181,6 @@ button.pageNumber:disabled { color: var(--c-icon-off); }
 .cueRow[data-blank] { justify-content: flex-end; }
 .cueRow[data-blank] .cueDelete { color: var(--c-cue-delete-empty); }
 
-/* The hot-cue list is eight fixed slots; an empty one shows its letter and
-   nothing else, so the list reads as the pads do. */
-.cueChip {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--s-pad-cue-inner);
-  height: var(--s-pad-cue-inner);
-  border-radius: 1px;
-  font-size: var(--f-size-sm);
-  font-weight: 700;
-  color: var(--c-pad-label);
-  flex: none;
-}
-.cueChip[data-set] { background: var(--cue-colour, var(--c-pad-set)); color: var(--c-black); }
-
 .cueTime { color: var(--c-text); font-variant-numeric: tabular-nums; flex: none; }
 .memoryCueDot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .cueName { color: var(--c-text); flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
@@ -1162,10 +1211,165 @@ button.cueDelete:hover:not(:disabled),
 button.cueDelete:focus-visible:not(:disabled) { background: var(--c-error); color: var(--c-icon-on); }
 button.cueDelete:disabled { color: var(--c-icon-off); }
 .cueRow[role="button"] { cursor: default; text-align: left; }
-/* A hot cue row dragged to another slot: it dims where it was lifted from and
-   the slot it would land on is outlined. */
-.cueRow[data-dragging] { opacity: .4; }
-.cueRow[data-drop] { outline: 1px solid var(--c-accent); outline-offset: -1px; }
+/* A hot cue pad dragged to another one: it dims where it was lifted from and
+   the pad it would land on is outlined. */
+.padCell[data-dragging] { opacity: .4; }
+.padCell[data-drop] { outline: 1px solid var(--c-accent); outline-offset: -1px; }
+
+/* The pads beside the deck, laid out as the controller's: the four mode
+   buttons with their SHIFT modes printed below, then two rows of four pads. */
+.padPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.padModes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 5px 5px 0;
+}
+.padModeButton { display: flex; flex-direction: column; align-items: stretch; gap: 1px; min-width: 0; }
+.padModeButton button {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border: 1px solid var(--c-outline);
+  border-radius: 2px;
+  background: var(--c-panel);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--f-size-xs);
+  font-weight: 700;
+  padding: 2px 0;
+  cursor: default;
+}
+/* The SHIFT mode: the small print under the button, no box of its own. */
+.padModeButton button[data-shift] {
+  border-color: transparent;
+  background: none;
+  color: var(--c-text-dim);
+  font-size: 9px;
+  padding: 0;
+}
+.padModeButton button[data-on] {
+  background: var(--c-tab-active);
+  border-color: var(--c-tab-active);
+  color: var(--c-icon-on);
+}
+.padModeButton button[data-shift][data-on] { background: none; color: var(--c-tab-active); }
+.padModeButton button:focus-visible { outline: 1px solid var(--c-accent); outline-offset: 1px; }
+.padNote {
+  margin: 4px 6px 0;
+  font-size: var(--f-size-xs);
+  color: var(--c-text-dim);
+}
+.padGrid {
+  flex: 0 1 auto;
+  /* Two rows of square pads at the panel's width: four pads and five gaps
+     across, so each is (width - 25) / 4. */
+  height: calc((100cqi - 25px) / 2 + 15px);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(var(--s-cue-row-h), 1fr));
+  gap: 5px;
+  padding: 5px;
+  min-height: 0;
+  /* The pads' print grows with the panel's width. */
+  container-type: inline-size;
+}
+/* One pad: the hardware's dark rubber square, its edge lit as the LED is. */
+.padCell {
+  --pad-lit: var(--cue-colour, var(--c-pad-active));
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px;
+  border: 1px solid var(--c-raised);
+  border-radius: 4px;
+  background: var(--c-pad-well);
+  box-shadow: inset 0 -2px 0 rgb(0 0 0 / 0.45);
+  color: var(--c-pad-label);
+  font-size: var(--f-size-xs);
+  font-weight: 700;
+  text-align: center;
+  cursor: default;
+  user-select: none;
+  transition: background 60ms, box-shadow 60ms, border-color 60ms;
+}
+.padCell[data-lit] {
+  border-color: var(--pad-lit);
+  background: color-mix(in srgb, var(--pad-lit) 14%, var(--c-pad-well));
+  box-shadow: inset 0 -2px 0 rgb(0 0 0 / 0.45), inset 0 0 6px color-mix(in srgb, var(--pad-lit) 35%, transparent);
+  color: var(--c-text);
+}
+.padCell[data-lit]:hover { background: color-mix(in srgb, var(--pad-lit) 24%, var(--c-pad-well)); }
+.padCell[data-lit]:active,
+.padCell[data-on] {
+  background: color-mix(in srgb, var(--pad-lit) 55%, var(--c-pad-well));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--pad-lit) 60%, transparent);
+  color: var(--c-icon-on);
+}
+.padCell[data-empty] { opacity: 0.6; }
+.padCell:focus-visible { outline: 1px solid var(--c-accent); outline-offset: 1px; }
+.padTop { display: flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; }
+/* The letter as the pad's own coloured square, in the cue's colour once set. */
+.padLetter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: clamp(13px, 7cqi, 20px);
+  height: clamp(13px, 7cqi, 20px);
+  border-radius: 2px;
+  font-size: clamp(10px, 5cqi, 13px);
+  color: inherit;
+}
+.padCell[data-lit] .padLetter { background: var(--pad-lit); color: var(--c-black); }
+.padValue {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: clamp(9px, 4.6cqi, 13px);
+  letter-spacing: -0.4px;
+  font-variant-numeric: tabular-nums;
+}
+.padSub { color: var(--c-text-dim); font-size: clamp(9px, 4.2cqi, 12px); }
+.padCell[data-on] .padSub { color: inherit; }
+.padCell .cueName {
+  flex: none;
+  max-width: 100%;
+  font-size: clamp(9px, 4.2cqi, 11px);
+  font-weight: 400;
+  color: var(--c-text-dim);
+  text-overflow: ellipsis;
+}
+.cueLoop {
+  flex: none;
+  font-weight: 700;
+  color: var(--c-cue-orange);
+}
+/* The ✕ in the pad's corner, and only under the pointer. */
+.padCell button.cueDelete {
+  opacity: 0;
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  margin: 0;
+  padding: 0 3px;
+  font-size: 9px;
+  background: var(--c-pad-well);
+}
+.padCell:hover button.cueDelete,
+.padCell:focus-within button.cueDelete { opacity: 1; }
 
 /* The INFO tab is DeckInfo.module.css. */
 

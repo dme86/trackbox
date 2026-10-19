@@ -31,8 +31,16 @@ describe("sanitiseSession", () => {
       trafficLight: "b",
       waveformZoom: { a: 4, b: 32 },
       dualControl: true,
+      deckHeights: { two: 560, vertical: 610 },
     };
     expect(sanitiseSession(session)).toEqual(session);
+  });
+
+  it("keeps only deck heights it could draw", () => {
+    expect(sanitiseSession({}).deckHeights).toEqual({});
+    expect(sanitiseSession({
+      deckHeights: { one: 330.6, two: -1, vertical: "tall", simple: 200 },
+    }).deckHeights).toEqual({ one: 331 });
   });
 
   it("gives a session from before the sub-browser had widths the measured ones", () => {

@@ -3915,6 +3915,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rbl-control"
+version = "1.6.0"
+dependencies = [
+ "midir",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rbl-core"
 version = "1.6.0"
 dependencies = [
@@ -4136,6 +4145,7 @@ name = "rbxport"
 version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dirs 5.0.1",
  "drag",
  "libc",
@@ -4149,6 +4159,7 @@ dependencies = [
  "rbl-anlz",
  "rbl-audio",
  "rbl-backup",
+ "rbl-control",
  "rbl-core",
  "rbl-db",
  "rbl-dbserver",

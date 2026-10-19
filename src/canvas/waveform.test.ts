@@ -406,11 +406,11 @@ describe("the BLUE and RGB palettes", () => {
 
   it("RGB reads PWV4's height and its three channels, the strongest at full", () => {
     // Height 127 of 127; channels low 40 (red), mid 10 (green), high 80
-    // (blue) → blue strongest.
+    // (blue) → blue strongest, the mid damped and all three to the 1.5 power.
     const { ctx, fills } = recorder();
     drawColumns(ctx, new Uint8Array([127, 200, 30, 40, 10, 80]), 1, 100, "rgb", false);
     expect(fills).toHaveLength(1);
-    expect(fills[0]!.style).toBe("rgb(128,32,255)");
+    expect(fills[0]!.style).toBe("rgb(90,5,255)");
     expect(fills[0]!.h).toBeCloseTo(100, 5);
   });
 
@@ -420,7 +420,8 @@ describe("the BLUE and RGB palettes", () => {
     const { ctx, fills } = recorder();
     drawColumns(ctx, new Uint8Array([word >> 8, word & 0xff]), 1, 62, "rgb", true);
     expect(fills).toHaveLength(1);
-    expect(fills[0]!.style).toBe("rgb(255,0,109)");
+    // Squared, then at full brightness: the strongest band stays on top.
+    expect(fills[0]!.style).toBe("rgb(255,0,47)");
     expect(fills[0]!.h).toBeCloseTo((16 / 31) * 62, 5);
   });
 

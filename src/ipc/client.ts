@@ -15,7 +15,7 @@ import type {
   DatabaseDrive, EditHistoryState, ItunesLibrary, LibraryProblem, LibrarySummary, LinkPeerSeen, Meters,
   LinkStatus, MissingExportFile, MissingTrack, MissingTracks, PreviewState, UnanalysedTracks, ReferenceStickSettings, RelocateReport, RowDto, ScriptRequest, Tick,
   TreeNode, ViewHandle,
-  SelectionDetails, TrackDetails, TrackLookups,
+  SelectionDetails, TrackDetails, TrackLookups, ControllerIntent, ControllerStatus, RecordingStatus, SmartCfxState,
 } from "./types";
 import { tauriInvoke } from "./invoke";
 
@@ -360,6 +360,27 @@ async function realBackend(): Promise<Backend> {
     setChannelTrim: (deck, trim) => invoke<void>("set_channel_trim", { deck, trim }),
     setChannelVolume: (deck, volume) => invoke<void>("set_channel_volume", { deck, volume }),
     setCrossfade: (position) => invoke<void>("set_crossfade", { position }),
+    setChannelCue: (deck, on) => invoke<void>("set_channel_cue", { deck, on }),
+    setHeadphoneMix: (position) => invoke<void>("set_headphone_mix", { position }),
+    setCueRouting: (routing) => invoke<void>("set_cue_routing", { routing }),
+    setChannelFilter: (deck, position) => invoke<void>("set_channel_filter", { deck, position }),
+    setCrossfaderOn: (on) => invoke<void>("set_crossfader_on", { on }),
+    setBeatFx: (fx) => invoke<void>("set_beat_fx", { fx }),
+    onControllerIntent: (listener) => subscribe<ControllerIntent>("controller:intent", listener),
+    onControllerStatus: (listener) => subscribe<ControllerStatus>("controller:status", listener),
+    onAudioDeviceLost: (listener) => subscribe<string>("audio:device-lost", listener),
+    startRecording: (folder) => invoke<RecordingStatus>("start_recording", { folder }),
+    stopRecording: () => invoke<RecordingStatus | null>("stop_recording"),
+    recordingStatus: () => invoke<RecordingStatus | null>("recording_status"),
+    onRecordingStatus: (listener) => subscribe<RecordingStatus>("record:status", listener),
+    controllerStatus: () => invoke<ControllerStatus>("controller_status"),
+    controllerLeds: (deck, leds) => invoke<void>("controller_leds", { deck, leds }),
+    setJogVinyl: (on) => invoke<void>("set_jog_vinyl", { on }),
+    setPadFx: (deck, fx, beatMs) => invoke<void>("set_pad_fx", { deck, fx, beatMs }),
+    setSmartCfxOn: (on) => invoke<void>("set_smart_cfx_on", { on }),
+    setSmartCfxKind: (kind) => invoke<void>("set_smart_cfx_kind", { kind }),
+    smartCfxState: () => invoke<SmartCfxState>("smart_cfx_state"),
+    onSmartCfx: (listener) => subscribe<SmartCfxState>("mixer:smart-cfx", listener),
     setEqCurve: (isolator) => invoke<void>("set_eq_curve", { isolator }),
     appDiagnostics: () => invoke<Diagnostics>("app_diagnostics"),
     appVersion: () => invoke<string>("app_version"),
@@ -477,7 +498,9 @@ async function realBackend(): Promise<Backend> {
       return typeof picked === "string" ? picked : null;
     },
     openPreferences: async (pane) => {
-      await invoke<void>("open_preferences", { pane });
+      // The shell has windows: a failed open is not a reason to draw a second
+      // Preferences over the main one.
+      await invoke<void>("open_preferences", { pane }).catch(() => {});
       return true;
     },
     onPreferencesReset: (listener) => subscribe<PreferencesRequest>("preferences:reset", listener),

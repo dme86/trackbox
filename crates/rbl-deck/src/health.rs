@@ -9,6 +9,8 @@ pub struct AudioHealth {
     pub load: f32,
     /// Callbacks whose processing exceeded the duration of their audio.
     pub xruns: u64,
+    /// Callbacks in which a playing deck ran out of decoded audio, both decks.
+    pub starved: u64,
 }
 
 #[derive(Default)]
@@ -34,6 +36,7 @@ impl HealthMeter {
         AudioHealth {
             load: if running { f32::from_bits(self.load.load(Ordering::Relaxed)) } else { 0.0 },
             xruns: self.xruns.load(Ordering::Relaxed),
+            starved: 0,
         }
     }
 }

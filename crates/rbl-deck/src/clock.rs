@@ -60,6 +60,10 @@ pub struct DeckClock {
     loop_in: AtomicU64,
     loop_out: AtomicU64,
     looping: AtomicBool,
+    /// Callbacks in which the deck was playing and its ring ran out of
+    /// decoded audio before the end of the track. Includes the refill right
+    /// after a seek.
+    starved: AtomicU64,
 }
 
 /// A deck's state at one instant, for the tick the interface extrapolates from.
@@ -326,6 +330,14 @@ impl DeckClock {
     /// generation the counter has not reached.
     pub fn bump_generation(&self) -> u32 {
         self.generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    pub fn starved(&self) -> u64 {
+        self.starved.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_starved(&self) {
+        self.starved.fetch_add(1, Ordering::Relaxed);
     }
 }
 

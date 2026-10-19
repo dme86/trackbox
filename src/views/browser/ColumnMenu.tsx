@@ -14,7 +14,7 @@ import styles from "./ColumnMenu.module.css";
 /** Matches `.menu`'s width, for keeping the menu inside the window. */
 const MENU_WIDTH = 190;
 /** Two commands, a divider and the compact column rows. */
-const FULL_HEIGHT = 2 * 25 + MENU_COLUMNS.length * 20 + 16;
+const FULL_HEIGHT = 3 * 25 + MENU_COLUMNS.length * 20 + 16;
 
 export interface ColumnMenuProps {
   x: number;
@@ -25,11 +25,13 @@ export interface ColumnMenuProps {
   onToggle: (key: ColumnKey) => void;
   onAutoSize: (key: ColumnKey) => void;
   onAutoSizeAll: () => void;
+  /** Starts renaming the column the menu was opened on. */
+  onRename?: ((key: ColumnKey) => void) | undefined;
   onClose: () => void;
 }
 
 export function ColumnMenu({
-  x, y, target, visible, onToggle, onAutoSize, onAutoSizeAll, onClose,
+  x, y, target, visible, onToggle, onAutoSize, onAutoSizeAll, onRename, onClose,
 }: ColumnMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -90,6 +92,20 @@ export function ColumnMenu({
       >
         Auto-size all columns
       </button>
+      {onRename ? (
+        <button
+          type="button"
+          className={styles.item}
+          role="menuitem"
+          disabled={target === null}
+          onClick={() => {
+            if (target) onRename(target);
+            onClose();
+          }}
+        >
+          Rename this column…
+        </button>
+      ) : null}
       <div className={styles.separator} role="separator" />
       <div className={styles.list}>
         {MENU_COLUMNS.map((column) => (

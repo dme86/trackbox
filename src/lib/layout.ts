@@ -33,6 +33,27 @@ export function isFullDeck(layout: PlayerLayout): boolean {
   return layout !== "simple";
 }
 
+/**
+ * The deck bands whose height can be dragged, each remembered on its own: one
+ * deck, two stacked, and PERFORMANCE's two side by side. The simple player is
+ * a strip and Full Browser has no decks, so neither has one.
+ */
+export type DeckArrangement = "one" | "two" | "vertical";
+
+export const DECK_ARRANGEMENTS: readonly DeckArrangement[] = ["one", "two", "vertical"];
+
+/** The token holding each arrangement's own height, which is also its floor. */
+export const DECK_FLOOR_TOKEN: Readonly<Record<DeckArrangement, string>> = {
+  one: "--s-player-h",
+  two: "--s-player-dual-h",
+  vertical: "--s-player-vertical-min-h",
+};
+
+export function deckArrangement(layout: PlayerLayout, sideBySide: boolean): DeckArrangement | null {
+  if (layout === "two") return sideBySide ? "vertical" : "two";
+  return layout === "one" ? "one" : null;
+}
+
 /** The label the dropdown shows, falling back rather than going blank. */
 export function layoutLabel(layout: PlayerLayout): string {
   return LAYOUTS.find((entry) => entry.id === layout)?.label ?? "1 PLAYER";

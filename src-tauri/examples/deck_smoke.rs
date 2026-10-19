@@ -31,7 +31,7 @@ fn main() {
 
     // The device's own rate, so what this measures is what the app will do. A
     // machine at 96 kHz resamples every 44.1 kHz file in the library.
-    let rate = match rbl_deck::CpalSink::open(Box::new(|out: &mut [f32]| out.fill(0.0))) {
+    let rate = match rbl_deck::CpalSink::open(Box::new(|out: &mut [f32], _cue: &mut [f32]| out.fill(0.0))) {
         Ok(sink) => {
             println!("default device: {} Hz", sink.sample_rate());
             sink.sample_rate()

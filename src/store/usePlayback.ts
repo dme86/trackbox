@@ -188,7 +188,7 @@ export function reasonFrom(error: unknown): string {
 export function usePlayback(trackId: string | null, DECK: DeckId = DEFAULT_DECK, renderPosition = true): Playback {
   const [playing, setPlaying] = useState(false);
   const [tempo, setTempoState] = useState(1);
-  const [masterTempo, setMasterTempoState] = useState(false);
+  const [masterTempo, setMasterTempoState] = useState(true);
   const [keyShift, setKeyShiftState] = useState(0);
   const [shiftsKey, setShiftsKey] = useState(true);
   const [loop, setLoopState] = useState<DeckLoop | null>(null);
@@ -221,7 +221,8 @@ export function usePlayback(trackId: string | null, DECK: DeckId = DEFAULT_DECK,
   const transportVersion = useRef(0);
   const deferredSeek = useRef<number | null>(null);
   const desiredTempo = useRef(1);
-  const desiredMasterTempo = useRef(false);
+  // The tempo fader moves the speed and holds the key, as a DJ expects.
+  const desiredMasterTempo = useRef(true);
   const desiredKeyShift = useRef(0);
   const desiredLoop = useRef<DeckLoop | null>(null);
   /** Whether a drag is running, so a move is aimed rather than seeked. */

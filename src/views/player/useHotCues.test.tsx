@@ -355,3 +355,30 @@ describe("dragging a cue to another slot", () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe("a hot cue saved as a loop", () => {
+  const loopCue: Cue = { id: "7", positionMs: 2000, outMs: 4000, letter: "C", memory: false, colour: null };
+
+  it("starts the loop at its in point and plays", () => {
+    const loops: string[] = [];
+    mount({ cues: [loopCue], setLoop: (from, to) => loops.push(`${from}-${to}`) });
+    act(() => pads.press("C"));
+    expect(transport).toEqual(["seek:2", "play"]);
+    expect(loops).toEqual(["2-4"]);
+  });
+
+  it("lets go of the loop when pressed again while it plays", () => {
+    const loops: string[] = [];
+    let exited = false;
+    mount({
+      cues: [loopCue],
+      setLoop: (from, to) => loops.push(`${from}-${to}`),
+      activeLoop: () => ({ inSeconds: 2, outSeconds: 4 }),
+      exitLoop: () => { exited = true; },
+    });
+    act(() => pads.press("C"));
+    expect(exited).toBe(true);
+    expect(loops).toEqual([]);
+    expect(transport).toEqual([]);
+  });
+});

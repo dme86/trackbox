@@ -66,7 +66,7 @@ pub async fn open_preferences(app: tauri::AppHandle, pane: String) -> AppResult<
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
-    builder
+    let built = builder
         // Said in the log, because a window that opens blank says nothing
         // itself: which URL the webview was sent to and whether the page
         // started and finished loading. What 0.5.1's blank white window on
@@ -83,15 +83,18 @@ pub async fn open_preferences(app: tauri::AppHandle, pane: String) -> AppResult<
         .visible(false)
         .resizable(true)
         .accept_first_mouse(true)
-        .build()
-        .map(|window| {
+        .build();
+    match built {
+        Ok(window) => {
             // On Windows and Linux the application menu is a bar on every
             // window it is set on, and it was set on this one too (0.5.1):
             // File › Import at the top of Preferences. macOS has one menu
             // bar for the app, and there this is documented as doing nothing.
             let _ = window.hide_menu();
-        })
-        .map_err(|e| {
-            AppError::new(ErrorKind::Internal, format!("the Preferences window could not open: {e}"))
-        })
+            Ok(())
+        }
+        // Two opens at once (the menu's ⌘, can arrive twice): the other one built it.
+        Err(_) if app.get_webview_window(WINDOW).is_some() => Ok(()),
+        Err(e) => Err(AppError::new(ErrorKind::Internal, format!("the Preferences window could not open: {e}"))),
+    }
 }

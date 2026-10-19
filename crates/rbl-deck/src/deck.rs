@@ -46,6 +46,9 @@ pub enum Command {
     ScrubEnd,
     /// How fast to play, as a multiple of the file's own speed.
     SetTempo(f32),
+    /// A jog's pitch bend: a factor on the tempo that the tempo readout and
+    /// sync never see. 1.0 is no bend.
+    SetBend(f32),
     /// Master Tempo: whether the pitch is held while the speed changes.
     SetMasterTempo(bool),
     /// The key, in semitones from the track's own.
@@ -66,6 +69,14 @@ const TOP_UP_WAIT: Duration = Duration::from_millis(2);
 /// Playback wants the full ring, which absorbs a decode hiccup. A drag wants
 /// the opposite — every block already queued is a block of the pointer's past.
 const SCRUB_BLOCKS: usize = 3;
+
+/// Blocks kept queued while playing: about 64 ms at 48 kHz.
+///
+/// A tempo move, a jog bend and a key change are made in the decode thread,
+/// so they are heard only once what is queued has played out. The whole
+/// ring was 170 ms of that, which a DJ nudging a beat feels as a lag; six
+/// blocks still cover five device callbacks of 512 frames.
+const PLAY_BLOCKS: usize = 6;
 
 /// The longest loop whose audio is decoded once and kept, in device-rate
 /// frames: about six seconds at 44.1 kHz and three at 96 kHz, 2 MiB.
@@ -149,6 +160,7 @@ struct Worker {
     keylock: Box<dyn Stretcher>,
     varispeed: Varispeed,
     tempo: f32,
+    bend: f32,
     master_tempo: bool,
     /// Semitones from the track's own key. Any shift puts the key-lock
     /// stretcher in the path, since only it can move the pitch on its own;
@@ -168,11 +180,13 @@ struct Worker {
     /// How much of `feed` has been handed over.
     fed: usize,
     /// The audio of a loop no longer than [`LOOP_AUDIO_FRAMES`], interleaved,
-    /// decoded the first time the loop went round. Shorter than the loop when
-    /// the track ends inside it.
+    /// kept from the first pass the streamer read through it. Shorter than the
+    /// loop when the track ends inside it.
     loop_audio: Vec<f32>,
-    /// The loop `loop_audio` holds, as `(in, out)`.
+    /// The loop `loop_audio` holds, as `(in, out)`, once it holds all of it.
     loop_audio_range: Option<(u64, u64)>,
+    /// The loop `loop_audio` is being filled with as the streamer reads it.
+    capturing: Option<(u64, u64)>,
     /// Where in `loop_audio` the next frame of input comes from, in frames;
     /// `None` while it comes from the streamer. While it is `Some`, the
     /// streamer waits where `loop_audio` ends, which is where the track goes
@@ -210,6 +224,7 @@ impl Worker {
             keylock: key_lock(device_rate),
             varispeed: Varispeed::new(device_rate),
             tempo: 1.0,
+            bend: 1.0,
             master_tempo: false,
             key_shift: 0,
             head: 0.0,
@@ -217,6 +232,7 @@ impl Worker {
             fed: 0,
             loop_audio: Vec::new(),
             loop_audio_range: None,
+            capturing: None,
             from_loop_audio: None,
             wraps: VecDeque::with_capacity(64),
         }
@@ -273,6 +289,10 @@ impl Worker {
             Command::ScrubTo(frame, pre_roll, at) => self.scrub_to(frame, pre_roll, at),
             Command::ScrubEnd => self.scrub_end(),
             Command::SetTempo(tempo) => self.set_tempo(tempo),
+            Command::SetBend(bend) => {
+                self.bend = if bend.is_finite() { bend.clamp(0.5, 1.5) } else { 1.0 };
+                self.apply_ratio();
+            }
             Command::SetMasterTempo(on) => {
                 // The two hold different audio, so switching between them
                 // starts the new one from where the old one had reached
@@ -405,6 +425,7 @@ impl Worker {
         self.forget_input();
         self.loop_audio.clear();
         self.loop_audio_range = None;
+        self.capturing = None;
     }
 
     /// Where the next frame of input sits in the track.
@@ -441,12 +462,12 @@ impl Worker {
         if at < to || (stretching && at > to) {
             return true;
         }
-        if to - from <= LOOP_AUDIO_FRAMES {
-            if self.loop_audio_range != Some((from, to)) && !self.decode_loop_audio(from, to) {
-                return false;
-            }
+        if to - from <= LOOP_AUDIO_FRAMES && self.loop_audio_range == Some((from, to)) {
             self.from_loop_audio = (!self.loop_audio.is_empty()).then_some(0);
         } else {
+            // Not held yet: a seek, and the pass that follows is kept
+            // (`capture`). Decoding the whole loop here instead took longer
+            // than the queued audio lasts, and the deck stuttered on it.
             self.from_loop_audio = None;
             let Some(streamer) = self.streamer.as_mut() else { return false };
             if let Err(e) = streamer.seek(from) {
@@ -462,34 +483,34 @@ impl Worker {
         true
     }
 
-    /// Decodes `from..to` into `loop_audio`, leaving the streamer at `to`, or
-    /// at the end of the track if that comes first.
-    fn decode_loop_audio(&mut self, from: u64, to: u64) -> bool {
-        self.from_loop_audio = None;
-        self.loop_audio_range = None;
-        let Some(streamer) = self.streamer.as_mut() else { return false };
-        let length = usize::try_from(to - from).unwrap_or(0);
-        self.loop_audio.clear();
-        self.loop_audio.resize(length * 2, 0.0);
-        let mut filled = 0;
-        let mut failed = streamer.seek(from).err();
-        while failed.is_none() && filled < length {
-            let Some(rest) = self.loop_audio.get_mut(filled * 2..) else { break };
-            match streamer.fill(rest) {
-                Ok(0) => break,
-                Ok(frames) => filled += frames,
-                Err(e) => failed = Some(e),
+    /// Keeps what the streamer read of a short loop, from its in point on, so
+    /// every later pass is read from memory. A read that does not continue
+    /// the pass (a seek, a different loop) starts over.
+    fn capture(&mut self, start: u64, audio: &[f32]) {
+        let Some((from, to)) = self.active_loop() else { return };
+        if to - from > LOOP_AUDIO_FRAMES || self.loop_audio_range == Some((from, to)) {
+            return;
+        }
+        if self.capturing != Some((from, to)) {
+            if start != from {
+                return;
             }
-        }
-        if let Some(e) = failed {
+            self.capturing = Some((from, to));
+            self.loop_audio_range = None;
             self.loop_audio.clear();
-            self.clock.set_end_of_stream(true);
-            self.report(&e);
-            return false;
+            self.loop_audio.reserve(usize::try_from((to - from) * 2).unwrap_or(0));
         }
-        self.loop_audio.truncate(filled * 2);
-        self.loop_audio_range = Some((from, to));
-        true
+        let held = (self.loop_audio.len() / 2) as u64;
+        if start != from + held {
+            self.capturing = None;
+            self.loop_audio.clear();
+            return;
+        }
+        self.loop_audio.extend_from_slice(audio);
+        if from + held + (audio.len() / 2) as u64 >= to {
+            self.capturing = None;
+            self.loop_audio_range = Some((from, to));
+        }
     }
 
     /// Reads input into `out`, from the loop audio or the streamer, stopping
@@ -518,7 +539,13 @@ impl Worker {
             // frame the block's audio begins at. Stamping that put the
             // playhead a few hundred frames early for one block after every
             // seek.
-            Ok(frames) => Some((streamer.position() - frames as u64, frames)),
+            Ok(frames) => {
+                let start = streamer.position() - frames as u64;
+                if let Some(read) = out.get(..frames * 2) {
+                    self.capture(start, read);
+                }
+                Some((start, frames))
+            }
             Err(e) => {
                 // A decode that fails mid-track stops the deck rather than
                 // playing whatever was left in the buffer.
@@ -565,9 +592,19 @@ impl Worker {
             1.0
         };
         self.tempo = safe;
-        self.keylock.set_ratio(safe);
-        self.varispeed.set_ratio(safe);
         self.clock.set_tempo(safe);
+        self.apply_ratio();
+    }
+
+    /// The speed actually played: the tempo with the bend on it.
+    fn ratio(&self) -> f32 {
+        (self.tempo * self.bend).clamp(crate::stretch::MIN_RATIO, crate::stretch::MAX_RATIO)
+    }
+
+    fn apply_ratio(&mut self) {
+        let ratio = self.ratio();
+        self.keylock.set_ratio(ratio);
+        self.varispeed.set_ratio(ratio);
         self.apply_pitch();
     }
 
@@ -581,7 +618,7 @@ impl Worker {
     /// the pitch a record would have at this speed when Master Tempo is off.
     fn apply_pitch(&mut self) {
         let shift = 2_f32.powf(f32::from(self.key_shift) / 12.0);
-        let base = if self.master_tempo { 1.0 } else { self.tempo };
+        let base = if self.master_tempo { 1.0 } else { self.ratio() };
         self.keylock.set_pitch_scale(base * shift);
     }
 
@@ -742,7 +779,7 @@ impl Worker {
         if self.scrubber.is_some() {
             return self.produce_scrub();
         }
-        if self.producer.is_full() {
+        if RING_BLOCKS - self.producer.slots() >= PLAY_BLOCKS {
             return false;
         }
         let generation = self.generation;
@@ -798,7 +835,7 @@ impl Worker {
     /// Whether the audio goes through a stretcher rather than straight: the
     /// speed or the key is not the file's own.
     fn stretching(&self) -> bool {
-        (self.tempo - 1.0).abs() > f32::EPSILON || self.key_shift != 0
+        (self.ratio() - 1.0).abs() > f32::EPSILON || self.key_shift != 0
     }
 
     /// The same, with the tempo control in the path.
@@ -809,7 +846,7 @@ impl Worker {
     /// place. It is counted forward instead, by what each block of output
     /// consumed at the speed it was played at.
     fn produce_stretched(&mut self, generation: u32) -> bool {
-        let tempo = f64::from(self.tempo);
+        let tempo = f64::from(self.ratio());
         let mut block = Block::empty(generation, self.head as u64);
         let mut frames = 0;
         let limit = self.block_limit(tempo);

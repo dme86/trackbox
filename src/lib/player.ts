@@ -196,17 +196,19 @@ export function zoomBy(bars: number, direction: number): number {
   return ZOOM_STEPS[to] ?? DETAIL_BARS;
 }
 
+/** The zoom's bars are counted at this tempo, so every deck scrolls at the same speed. */
+export const DETAIL_REFERENCE_BPM = 128;
+
 /**
- * What fraction of a track `bars` covers at a given tempo.
+ * What fraction of a track the scrolling waveform shows.
  *
- * Falls back to a fraction of the whole track when the tempo or length is
- * unknown, so an unanalysed track still draws something rather than dividing
- * by zero.
+ * A fixed stretch of real time, as rekordbox draws it: both decks scroll at
+ * one speed, and a faster tempo puts more of the track, and narrower beats,
+ * in the same width.
  */
-export function detailSpan(bars: number, bpmX100: number, durationSec: number): number {
-  if (bpmX100 <= 0 || durationSec <= 0) return 0.08;
-  const bpm = bpmX100 / 100;
-  const seconds = (bars * BEATS_PER_BAR * 60) / bpm;
+export function detailSpan(bars: number, tempo: number, durationSec: number): number {
+  if (durationSec <= 0) return 0.08;
+  const seconds = ((bars * BEATS_PER_BAR * 60) / DETAIL_REFERENCE_BPM) * (tempo > 0 ? tempo : 1);
   // Never more than the whole track, and never so small that a rounding error
   // collapses the window to nothing.
   return Math.min(1, Math.max(seconds / durationSec, 1e-4));
@@ -423,7 +425,7 @@ export const READOUT_COLUMNS: readonly SortColumn[] = ["key", "bpm"];
 export type PadMode = "cue" | "grid";
 
 /** Which list the panel beside the deck is showing. */
-export type CuePanel = "memory" | "hotCue" | "info";
+export type CuePanel = "memory" | "hotCue" | "pads" | "info";
 
 /**
  * The cues one panel tab lists.
@@ -436,7 +438,7 @@ export function cuesFor<T extends { memory: boolean; positionMs: number }>(
   cues: readonly T[],
   panel: CuePanel,
 ): T[] {
-  if (panel === "info") return [];
+  if (panel === "info" || panel === "pads") return [];
   const want = panel === "memory";
   return cues.filter((cue) => cue.memory === want).sort((a, b) => a.positionMs - b.positionMs);
 }
@@ -966,6 +968,18 @@ export function faderToTempo(at: number, range: TempoRange): number {
   return 1 + pct / 100;
 }
 
+/** How close to a whole BPM (or the track's own tempo) a fader lands on it. */
+export const TEMPO_SNAP_BPM = 0.15;
+
+/** A fader's tempo, caught on the whole BPM it is close to: 127.93 plays at 128. */
+export function snapTempo(tempo: number, bpmX100: number): number {
+  if (bpmX100 <= 0) return tempo;
+  const bpm = (tempo * bpmX100) / 100;
+  if (Math.abs(bpm - bpmX100 / 100) < TEMPO_SNAP_BPM) return 1;
+  const whole = Math.round(bpm);
+  return Math.abs(bpm - whole) < TEMPO_SNAP_BPM ? (whole * 100) / bpmX100 : tempo;
+}
+
 /**
  * The tempo for a BPM somebody typed, against the track's own: 130 typed
  * over a 128 BPM track is 1.5625 % up. Nothing to type against — no grid,
@@ -1057,6 +1071,29 @@ export function resizedLoopRange(
  */
 export function wrapIntoLoop(head: number, from: number, to: number): number {
   return head >= to && to > from ? from + ((head - from) % (to - from)) : head;
+}
+
+/** The shortest loop the jog squeezes a loop to, in seconds. [ASSUME] */
+export const LOOP_ADJUST_MIN_SECONDS = 0.01;
+
+/**
+ * The loop `inSeconds`–`outSeconds` with one end moved by `deltaSeconds`, as
+ * SHIFT+LOOP IN or OUT and the jog move it: the in point not before 0, the
+ * out point not past `duration` when that is known, and the two never closer
+ * than LOOP_ADJUST_MIN_SECONDS.
+ */
+export function adjustLoopPoint(
+  inSeconds: number,
+  outSeconds: number,
+  point: "in" | "out",
+  deltaSeconds: number,
+  duration: number,
+): [number, number] {
+  if (point === "in") {
+    return [Math.max(Math.min(inSeconds + deltaSeconds, outSeconds - LOOP_ADJUST_MIN_SECONDS), 0), outSeconds];
+  }
+  const end = duration > 0 ? duration : Infinity;
+  return [inSeconds, Math.max(Math.min(outSeconds + deltaSeconds, end), inSeconds + LOOP_ADJUST_MIN_SECONDS)];
 }
 
 /**

@@ -42,6 +42,9 @@ const SOURCES: ReadonlyArray<{
   { id: "tagList", label: "Tag List", Icon: ListIcon },
 ];
 
+/** The rail's sections, top to bottom, for the controller's BROWSE knob. */
+export const RAIL_SOURCES: readonly Source[] = SOURCES.map((source) => source.id);
+
 export interface SourceRailProps {
   selected: Source;
   onSelect: (source: Source) => void;

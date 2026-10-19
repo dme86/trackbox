@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rbl_deck::{Deck, DeckEvent, Engine, NullSink, Sink, FADE_FRAMES};
+use rbl_deck::{Deck, DeckEvent, Engine, NullSink, PadFxKind, Sink, SmartCfxKind, FADE_FRAMES};
 
 const RATE: u32 = 44_100;
 
@@ -653,6 +653,26 @@ fn a_track_is_audible_within_the_load_budget() {
     }
     let took = heard.expect("the deck never made a sound").as_millis();
     assert!(took <= LOAD_TO_AUDIO_MS, "load to audio took {took} ms");
+}
+
+#[test]
+fn a_bend_moves_the_playhead_faster_and_leaves_the_tempo_readout_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ramp.wav");
+    ramp(&path, RATE as usize * 20);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    h.engine.set_bend(Deck::A, 1.2);
+    h.engine.play(Deck::A);
+    let pulls = 40;
+    for _ in 0..pulls {
+        h.sink.pull(512);
+        std::thread::sleep(Duration::from_millis(12));
+    }
+    let ratio = h.position(Deck::A) as f64 / f64::from(pulls * 512);
+    assert!(ratio > 1.05, "a 1.2 bend covered {ratio:.2} of the track per frame");
+    assert!((h.engine.snapshot().a.tempo - 1.0).abs() < f32::EPSILON, "the readout moved with the bend");
 }
 
 #[test]
@@ -1326,6 +1346,9 @@ fn two_decks_summed(h: &Harness) -> Vec<f32> {
     // measurement must follow the device's sample clock.
     // Past the fade in, input smoothing, and the 250 ms limiter release.
     h.play_until_paced(Deck::A, u64::from(RATE));
+    // The reduction meter holds its deepest reading until read: read it
+    // once here so the start-up transient does not count.
+    let _ = h.engine.master().reduction_db();
     let mut out = Vec::new();
     let period = Duration::from_micros(512 * 1_000_000 / u64::from(RATE));
     let mut next = Instant::now();
@@ -1543,4 +1566,462 @@ fn lead_in_obeys_tempo_and_pause() {
     h.engine.play(Deck::A);
     h.sink.pull(4410);
     assert_eq!(h.engine.snapshot().a.pre_roll_frames, 44100 - 13230);
+}
+
+fn peak(out: &[f32]) -> f32 {
+    out.iter().fold(0.0_f32, |acc, s| acc.max(s.abs()))
+}
+
+/// The second half of a pull, past the deck's fade in and the cue's.
+fn settled(out: &[f32]) -> &[f32] {
+    out.get(out.len() / 2..).unwrap_or(out)
+}
+
+impl Harness {
+    /// Master and headphones, pulled together a callback at a time.
+    fn pull_with_cue(&self, pulls: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut master = Vec::new();
+        let mut cue = Vec::new();
+        for _ in 0..pulls {
+            let (m, c) = self.sink.pull_with_cue(512);
+            master.extend(m);
+            cue.extend(c);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        (master, cue)
+    }
+}
+
+/// A flat track on deck A, playing, with the channel fader down.
+fn cued_with_fader_down() -> (tempfile::TempDir, Harness) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.wav");
+    flat(&path, RATE as usize * 2);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    h.engine.mixer().channels[0].set_volume(0.0);
+    h.engine.mixer().set_headphone_mix(0.0);
+    h.engine.play(Deck::A);
+    (dir, h)
+}
+
+#[test]
+fn cue_listens_before_the_fader_and_the_master_does_not_hear_it() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_cue(true);
+    let (master, cue) = h.pull_with_cue(24);
+    assert!(peak(settled(&master)) < INAUDIBLE, "the master heard a faded-out deck");
+    // Trim and EQ at unity, so the cue is the track less its headroom.
+    let expected = FLAT * 0.501_187_2;
+    let heard = peak(settled(&cue));
+    assert!((heard - expected).abs() < 0.02, "the cue was at {heard}, not {expected}");
+}
+
+#[test]
+fn the_channel_meter_reads_before_the_fader_and_does_not_steal_the_controllers_peak() {
+    let (_dir, h) = cued_with_fader_down();
+    let a = &h.engine.mixer().channels[0];
+    let b = &h.engine.mixer().channels[1];
+    let _ = h.pull_with_cue(24);
+    // Past the start-up, so only the settled track is read.
+    let _ = (a.take_level(), a.take_meter(), b.take_meter());
+    let _ = h.pull_with_cue(8);
+    // The track as the file has it, with the fader all the way down.
+    let expected = FLAT;
+    let level = a.take_level();
+    let meter = a.take_meter();
+    assert!((meter - expected).abs() < 0.02, "the meter read {meter}, not {expected}");
+    assert!((level - meter).abs() < 1e-6, "the controller read {level}, the meter {meter}");
+    let empty = b.take_meter();
+    assert!(empty < INAUDIBLE, "an empty deck metered {empty}");
+    // Clearing one leaves the other alone.
+    let _ = h.pull_with_cue(4);
+    let _ = a.take_level();
+    assert!(a.take_meter() > 0.3, "reading the controller's peak cleared the meter");
+    let _ = h.pull_with_cue(4);
+    let _ = a.take_meter();
+    assert!(a.take_level() > 0.3, "reading the meter cleared the controller's peak");
+}
+
+#[test]
+fn nothing_cued_and_the_mix_at_cue_is_silence_on_the_headphones() {
+    let (_dir, h) = cued_with_fader_down();
+    let (_, cue) = h.pull_with_cue(24);
+    assert!(peak(&cue) < INAUDIBLE, "the headphones played {}", peak(&cue));
+}
+
+#[test]
+fn nothing_cued_is_silence_on_the_headphones_even_with_the_mix_at_master() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_volume(1.0);
+    h.engine.mixer().set_headphone_mix(1.0);
+    let (master, cue) = h.pull_with_cue(24);
+    assert!(peak(settled(&master)) > 0.7, "the master should be playing");
+    assert!(peak(&cue) < INAUDIBLE, "the headphones played {} with nothing cued", peak(&cue));
+}
+
+#[test]
+fn master_cue_puts_the_master_on_the_headphones_with_the_mix_at_cue() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_volume(1.0);
+    h.engine.mixer().set_master_cue(true);
+    let (master, cue) = h.pull_with_cue(24);
+    let heard = peak(settled(&cue));
+    assert!((heard - peak(settled(&master))).abs() < 0.02, "MASTER CUE gave {heard} on the headphones");
+}
+
+#[test]
+fn an_echo_on_the_master_is_heard_and_off_leaves_it_alone() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_volume(1.0);
+    let (dry, _) = h.pull_with_cue(16);
+    h.engine.fx().set_on(true);
+    h.engine.fx().set_beat_ms(20.0);
+    h.engine.fx().set_depth(1.0);
+    let (wet, _) = h.pull_with_cue(16);
+    // A flat track with its echo on top is louder than without.
+    assert!(peak(settled(&wet)) > peak(settled(&dry)) + 0.1, "the echo was not heard");
+}
+
+#[test]
+fn the_mix_at_master_is_the_master_on_the_headphones() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_volume(1.0);
+    h.engine.mixer().set_headphone_mix(1.0);
+    h.engine.mixer().channels[0].set_cue(true);
+    let (master, cue) = h.pull_with_cue(24);
+    let worst = settled(&master)
+        .iter()
+        .zip(settled(&cue))
+        .map(|(m, c)| (m - c).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(peak(settled(&master)) > 0.7);
+    assert!(worst < 1e-4, "the headphones differed from the master by {worst}");
+}
+
+#[test]
+fn pressing_cue_fades_the_headphones_in_and_out_rather_than_clicking() {
+    let (_dir, h) = cued_with_fader_down();
+    let (_, mut cue) = h.pull_with_cue(12);
+    h.engine.mixer().channels[0].set_cue(true);
+    cue.extend(h.pull_with_cue(12).1);
+    h.engine.mixer().channels[0].set_cue(false);
+    cue.extend(h.pull_with_cue(12).1);
+    let worst = worst_step(&cue);
+    assert!(worst < step_limit(), "the headphones stepped by {worst}");
+    let tail = cue.get(cue.len() - 2_048..).unwrap();
+    assert!(peak(tail) < INAUDIBLE, "CUE off did not go back to silence");
+}
+
+#[test]
+fn the_master_is_the_same_to_the_sample_whatever_is_cued() {
+    // Two engines, one with headphones and everything cued and one without,
+    // pulled in step: the master must not move by a single bit.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ramp.wav");
+    ramp(&path, RATE as usize * 2);
+    let plain = harness();
+    let phones = harness();
+    for h in [&plain, &phones] {
+        h.engine.load(Deck::A, &path);
+        h.engine.load(Deck::B, &path);
+        h.wait_for_load(2);
+        h.engine.mixer().set_crossfade(0.3);
+    }
+    phones.engine.mixer().set_headphone_mix(0.4);
+    // Let both rings fill, so neither engine is waiting on its decoder.
+    std::thread::sleep(Duration::from_millis(100));
+    for h in [&plain, &phones] {
+        h.engine.play(Deck::A);
+        h.engine.play(Deck::B);
+    }
+    for i in 0..30 {
+        match i {
+            5 => phones.engine.mixer().channels[0].set_cue(true),
+            12 => phones.engine.mixer().channels[1].set_cue(true),
+            20 => phones.engine.mixer().channels[0].set_cue(false),
+            _ => {}
+        }
+        let expected = plain.sink.pull(512);
+        let (master, cue) = phones.sink.pull_with_cue(512);
+        assert_eq!(master, expected, "the master moved at pull {i}");
+        assert_eq!(cue.len(), master.len());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_lost_output_is_reported_and_both_decks_can_be_stopped_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.wav");
+    flat(&path, RATE as usize * 2);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.engine.load(Deck::B, &path);
+    h.wait_for_load(2);
+    h.engine.play(Deck::A);
+    h.engine.play(Deck::B);
+    h.play_until(Deck::A, 2048);
+    assert!(!h.engine.device_lost());
+
+    h.sink.lose();
+    assert!(h.engine.device_lost());
+    let at = h.position(Deck::A);
+    assert!(h.sink.pull(512).iter().all(|s| *s == 0.0), "a lost output renders nothing");
+    assert_eq!(h.position(Deck::A), at, "nothing played, so the playhead holds");
+
+    // What the app does on a loss: both decks stop where they are.
+    for deck in Deck::ALL {
+        h.engine.pause(deck);
+    }
+    assert!(!h.engine.snapshot().any_playing());
+    assert!(!h.sink.running(), "and the output is not asked to run");
+    assert!(h.engine.device_lost(), "a stopped engine is still on a lost output");
+}
+
+#[test]
+fn a_mixer_move_is_timed_to_the_first_callback_that_renders_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.wav");
+    flat(&path, RATE as usize * 2);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+
+    // Moved while nothing renders: the paused time is not a latency.
+    h.engine.mixer().set_crossfade(0.2);
+    h.engine.play(Deck::A);
+    h.sink.pull(512);
+    assert_eq!(h.engine.control_latency().count, 0);
+
+    h.engine.mixer().channels[0].set_volume(0.5);
+    std::thread::sleep(Duration::from_millis(3));
+    h.engine.mixer().set_crossfade(0.4);
+    h.sink.pull(512);
+    let seen = h.engine.control_latency();
+    assert_eq!(seen.count, 1, "two moves before one callback are one measurement");
+    assert!(seen.last >= Duration::from_millis(3), "measured from the older move: {seen:?}");
+    assert!(seen.last < Duration::from_secs(1), "{seen:?}");
+
+    h.sink.pull(512);
+    assert_eq!(h.engine.control_latency().count, 1, "a callback with no move measures nothing");
+}
+
+#[test]
+fn a_deck_that_never_runs_dry_is_never_counted_as_starved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.wav");
+    flat(&path, RATE as usize * 2);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    // A full ring before the first pull, then pulled no faster than a device.
+    std::thread::sleep(Duration::from_millis(100));
+    h.engine.play(Deck::A);
+    h.play_until_paced(Deck::A, u64::from(RATE) / 2);
+    assert_eq!(h.engine.audio_health().starved, 0);
+}
+
+#[test]
+fn a_recording_is_the_master_as_the_device_was_given_it_pauses_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tone.wav");
+    tone(&path, RATE as usize * 4);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    let file = dir.path().join("mix.flac");
+
+    h.engine.start_recording(&file).unwrap();
+    assert!(h.sink.running(), "recording keeps the device running");
+    h.engine.play(Deck::A);
+    let mut master = h.play_until_paced(Deck::A, u64::from(RATE));
+    h.engine.pause(Deck::A);
+    // Paused, the room hears silence and so does the file: the time is not cut out.
+    assert!(h.sink.running(), "a paused deck stopped the recording's device");
+    for _ in 0..20 {
+        master.extend(h.sink.pull(512));
+    }
+    let status = h.engine.stop_recording().unwrap();
+    assert!(!h.sink.running(), "the device stays up after the recording ended");
+    assert_eq!(status.error, None);
+    assert_eq!(status.dropped_frames, 0);
+    let frames = master.len() / 2;
+    assert!((status.seconds - frames as f64 / f64::from(RATE)).abs() < 1e-9, "{} s for {frames} frames", status.seconds);
+
+    let mut streamer = rbl_deck::decode::Streamer::open(&file, RATE).unwrap();
+    assert_eq!(streamer.total_frames(), frames as u64);
+    let mut decoded = vec![0.0_f32; master.len()];
+    let mut read = 0;
+    while read < decoded.len() {
+        let n = streamer.fill(&mut decoded[read..]).unwrap();
+        if n == 0 {
+            break;
+        }
+        read += n * 2;
+    }
+    assert_eq!(read, master.len());
+    let worst = master.iter().zip(&decoded).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+    // 24-bit, so one step of quantisation and nothing else.
+    assert!(worst < 2.0 / 8_388_608.0, "the file differs from the master by {worst}");
+    assert!(peak(&master) > 0.5, "nothing was played into the recording");
+}
+
+#[test]
+fn smart_cfx_at_centre_and_an_unpressed_pad_leave_the_master_bit_for_bit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ramp.wav");
+    ramp(&path, RATE as usize * 2);
+    let plain = harness();
+    let smart = harness();
+    for h in [&plain, &smart] {
+        h.engine.load(Deck::A, &path);
+        h.engine.load(Deck::B, &path);
+        h.wait_for_load(2);
+    }
+    smart.engine.mixer().set_smart_cfx_on(true);
+    // Inside the dead zone: the knob is at twelve o'clock as far as anyone can tell.
+    smart.engine.mixer().channels[0].set_filter(0.51);
+    smart.engine.mixer().channels[1].set_filter(0.49);
+    std::thread::sleep(Duration::from_millis(100));
+    for h in [&plain, &smart] {
+        h.engine.play(Deck::A);
+        h.engine.play(Deck::B);
+    }
+    for i in 0..30 {
+        match i {
+            5 => smart.engine.mixer().set_smart_cfx_kind(SmartCfxKind::Reverb),
+            10 => smart.engine.mixer().set_smart_cfx_kind(SmartCfxKind::Noise),
+            15 => smart.engine.mixer().set_smart_cfx_kind(SmartCfxKind::Crush),
+            20 => smart.engine.mixer().set_smart_cfx_on(false),
+            _ => {}
+        }
+        let expected = plain.sink.pull(512);
+        assert_eq!(smart.sink.pull(512), expected, "the master moved at pull {i}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn smart_cfx_noise_is_silence_at_centre_and_heard_off_it() {
+    // A steady level, so anything that moves sample to sample is the noise.
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_volume(1.0);
+    h.engine.mixer().set_smart_cfx_on(true);
+    h.engine.mixer().set_smart_cfx_kind(SmartCfxKind::Noise);
+    let (centre, _) = h.pull_with_cue(16);
+    let wobble = worst_step(settled(&centre));
+    assert!(wobble < 1e-5, "noise at centre: {wobble}");
+    h.engine.mixer().channels[0].set_filter(0.85);
+    let (off, _) = h.pull_with_cue(16);
+    let heard = worst_step(settled(&off));
+    assert!(heard > 0.01, "the riser moved by {heard}");
+    h.engine.mixer().set_smart_cfx_on(false);
+    let _ = h.pull_with_cue(8);
+    let (plain, _) = h.pull_with_cue(16);
+    let wobble = worst_step(settled(&plain));
+    assert!(wobble < 1e-5, "SMART CFX off left the noise on: {wobble}");
+}
+
+#[test]
+fn a_pad_is_heard_on_the_cue_before_the_fader() {
+    let (_dir, h) = cued_with_fader_down();
+    h.engine.mixer().channels[0].set_cue(true);
+    let (_, dry) = h.pull_with_cue(16);
+    assert!(settled(&dry).chunks_exact(2).all(|f| f[0].abs() > 0.3), "the cue was not playing");
+    // TRANS at a 20 ms beat: half of every 20 ms is silence.
+    h.engine.mixer().channels[0].set_pad_fx(Some((PadFxKind::Trans, 1.0)), 20.0);
+    let (master, wet) = h.pull_with_cue(16);
+    let gated = settled(&wet).chunks_exact(2).filter(|f| f[0].abs() < INAUDIBLE).count();
+    let frames = settled(&wet).len() / 2;
+    assert!(gated > frames / 3 && gated < frames * 2 / 3, "{gated} of {frames} frames gated");
+    assert!(peak(settled(&master)) < INAUDIBLE, "the fader was down, the master heard the pad");
+}
+
+#[test]
+fn a_roll_repeats_the_last_beat_and_letting_go_lands_where_the_deck_has_got_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ramp.wav");
+    let frames = RATE as usize * 4;
+    ramp(&path, frames);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    // Paced and from a full ring: an underrun inside the captured beat would
+    // be rolled along with it.
+    std::thread::sleep(Duration::from_millis(100));
+    h.engine.play(Deck::A);
+    h.play_until_paced(Deck::A, u64::from(RATE));
+    let pressed_at = h.position(Deck::A);
+    let value_then = 0.5 + 0.5 * (pressed_at as f32 / frames as f32);
+    // One beat of 100 ms: 4410 frames.
+    let beat = 4_410;
+    h.engine.mixer().channels[0].set_pad_fx(Some((PadFxKind::Roll, 1.0)), 100.0);
+    let rolled = h.play_until_paced(Deck::A, pressed_at + u64::from(RATE) / 2);
+    let left: Vec<f32> = rolled.chunks_exact(2).map(|f| f[0]).skip(512).collect();
+    assert!(left.len() > beat * 3, "the roll was too short to measure");
+    let top = left.iter().copied().fold(0.0_f32, f32::max);
+    assert!(top <= value_then + 0.002, "the roll played {top}, past the {value_then} it was pressed at");
+    // A beat later is the same frame, but for the seams' crossfades.
+    let differ = left.windows(beat + 1).filter(|w| (w[0] - w[beat]).abs() > 1e-4).count();
+    assert!(differ < left.len() / 20, "{differ} of {} frames did not repeat", left.len());
+
+    h.engine.mixer().channels[0].set_pad_fx(None, 100.0);
+    let at = h.position(Deck::A);
+    let after = h.play_until_paced(Deck::A, at + 8_192);
+    let live = after.chunks_exact(2).map(|f| f[0]).skip(512).fold(0.0_f32, f32::max);
+    // Half a second on: the ramp has climbed 0.0625 under the roll.
+    assert!(live > top + 0.03, "letting go came back at {live}, not where the deck had got to");
+}
+
+#[test]
+fn no_pad_stands_out_from_the_music_when_pressed_or_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tone.wav");
+    tone(&path, RATE as usize * 8);
+    let h = harness();
+    h.engine.load(Deck::A, &path);
+    h.wait_for_load(1);
+    std::thread::sleep(Duration::from_millis(100));
+    h.engine.play(Deck::A);
+    let mut audio = h.play_until_paced(Deck::A, 16_384);
+    // CRUSH is left out: steps are what a bit crusher is for.
+    for kind in [PadFxKind::Echo, PadFxKind::Reverb, PadFxKind::Trans, PadFxKind::Roll, PadFxKind::Hpf, PadFxKind::Lpf] {
+        h.engine.mixer().channels[0].set_pad_fx(Some((kind, 1.0)), 100.0);
+        let at = h.position(Deck::A);
+        audio.extend(h.play_until_paced(Deck::A, at + 8_820));
+        h.engine.mixer().channels[0].set_pad_fx(None, 100.0);
+        let at = h.position(Deck::A);
+        audio.extend(h.play_until_paced(Deck::A, at + 8_820));
+        let found = clicks(&audio);
+        assert_eq!(found, 0, "{kind:?}: {found} steps stood out from the music");
+    }
+}
+
+#[test]
+fn no_pad_steps_a_steady_level_on_press_or_release() {
+    let (_dir, h) = cued_with_fader_down();
+    // Low enough that an echo or a reverb piled on the level stays under the
+    // output's clamp, which would flatten any step it made.
+    h.engine.mixer().channels[0].set_volume(0.3);
+    let mut audio = Vec::new();
+    for _ in 0..8 {
+        audio.extend(h.sink.pull(512));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for kind in [PadFxKind::Trans, PadFxKind::Hpf, PadFxKind::Lpf, PadFxKind::Crush, PadFxKind::Echo, PadFxKind::Reverb] {
+        h.engine.mixer().channels[0].set_pad_fx(Some((kind, 1.0)), 50.0);
+        for _ in 0..6 {
+            audio.extend(h.sink.pull(512));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.engine.mixer().channels[0].set_pad_fx(None, 50.0);
+        for _ in 0..6 {
+            audio.extend(h.sink.pull(512));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let worst = worst_step(&audio[1_024..]);
+    assert!(worst <= step_limit(), "a pad stepped by {worst}");
 }

@@ -14,6 +14,7 @@ import {
   defaultLayout,
   folderLayout,
   moveColumn,
+  renameColumn,
   resizeColumn,
   resolve,
   sanitise,
@@ -67,6 +68,8 @@ export interface Columns {
   resize: (key: ColumnKey, width: number) => void;
   autoSize: (key: ColumnKey) => void;
   autoSizeEvery: () => void;
+  /** Renames a heading; an empty name restores the column's own. */
+  rename: (key: ColumnKey, label: string) => void;
   reset: () => void;
 }
 
@@ -105,6 +108,7 @@ export function useColumns(context: ColumnContext): Columns {
   );
   const autoSize = useCallback((key: ColumnKey) => setLayout((l) => autoSizeColumn(l, key)), []);
   const autoSizeEvery = useCallback(() => setLayout(autoSizeAll), []);
+  const rename = useCallback((key: ColumnKey, label: string) => setLayout((l) => renameColumn(l, key, label)), []);
   const reset = useCallback(() => setLayout(defaultFor(context)()), [context]);
 
   // Memoised as a whole, not just its callbacks. A fresh object on every
@@ -112,7 +116,7 @@ export function useColumns(context: ColumnContext): Columns {
   // rather than its parts, and one such effect calling back into the app was
   // re-rendering the whole window several hundred times a second.
   return useMemo(
-    () => ({ layout, columns, toggle, move, resize, autoSize, autoSizeEvery, reset }),
-    [layout, columns, toggle, move, resize, autoSize, autoSizeEvery, reset],
+    () => ({ layout, columns, toggle, move, resize, autoSize, autoSizeEvery, rename, reset }),
+    [layout, columns, toggle, move, resize, autoSize, autoSizeEvery, rename, reset],
   );
 }

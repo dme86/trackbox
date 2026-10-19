@@ -18,6 +18,7 @@ import type { GridEditorActions } from "./useGridEditor";
 import { memo, type ReactNode } from "react";
 
 import type { RowDto } from "@/ipc/types";
+import { formatBpm } from "@/lib/format";
 import { LoopInIcon, LoopOutIcon, MagnifierMinusIcon, MagnifierPlusIcon } from "@/components/icons";
 import { LOOP_BEATS_MAX, LOOP_BEATS_MIN, loopBeatsLabel } from "@/lib/player";
 import { READ_ONLY_REASON } from "./useMemoryCues";
@@ -60,9 +61,14 @@ export const DualHead = memo(function DualHead({
     <div className={styles.head} data-testid="player-head-row">
       {sleeve}
       <div className={styles.text}>
-        <span className={styles.title} data-testid="player-title">
-          {track ? track.title : ""}
-        </span>
+        <div className={styles.titleRow}>
+          <span className={styles.title} data-testid="player-title">
+            {track ? track.title : ""}
+          </span>
+          {track && baseBpmX100 > 0 ? (
+            <span className={styles.originalBpm} title="The track's own BPM">{formatBpm(baseBpmX100)} BPM</span>
+          ) : null}
+        </div>
         <span className={styles.artist} data-testid="player-artist">
           {track ? track.artist : ""}
         </span>

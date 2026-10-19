@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adjustLoopPoint,
+  LOOP_ADJUST_MIN_SECONDS,
   type BeatGrid,
   tempoAnnotations,
   beatAtMs,
@@ -25,6 +27,7 @@ import {
   waveSlice,
   tempoToFader,
   faderToTempo,
+  snapTempo,
   tempoForTypedBpm,
   beatCountText,
   detailWaveWindow,
@@ -57,31 +60,28 @@ import {
 } from "./player";
 
 describe("detailSpan", () => {
-  it("shows the same number of bars whatever the tempo", () => {
-    // Twelve bars at 128 BPM is 22.5 s. A fixed fraction cannot do this: on a
-    // three-minute track and a ninety-minute mix it shows wildly different
-    // amounts of music, and neither matches a CDJ.
+  it("shows the same stretch of real time on every deck, whatever its BPM", () => {
+    // Twelve bars at the reference 128 BPM is 22.5 s.
     const seconds = (DETAIL_BARS * BEATS_PER_BAR * 60) / 128;
     expect(seconds).toBeCloseTo(22.5, 5);
-    expect(detailSpan(DETAIL_BARS, 12_800, 338)).toBeCloseTo(seconds / 338, 6);
-    // Same bars, faster track: a smaller slice of the same length.
-    expect(detailSpan(DETAIL_BARS, 17_400, 338)).toBeLessThan(
-      detailSpan(DETAIL_BARS, 12_800, 338),
-    );
+    expect(detailSpan(DETAIL_BARS, 1, 338)).toBeCloseTo(seconds / 338, 6);
+  });
+
+  it("puts more of the track, and narrower beats, in the window at a faster tempo", () => {
+    expect(detailSpan(DETAIL_BARS, 1.06, 338)).toBeCloseTo(detailSpan(DETAIL_BARS, 1, 338) * 1.06, 6);
   });
 
   it("covers twice as much at twice the bars", () => {
-    expect(detailSpan(24, 12_800, 338)).toBeCloseTo(detailSpan(12, 12_800, 338) * 2, 6);
+    expect(detailSpan(24, 1, 338)).toBeCloseTo(detailSpan(12, 1, 338) * 2, 6);
   });
 
   it("never exceeds the whole track", () => {
-    // Twelve bars of a very slow, very short track is longer than the track.
-    expect(detailSpan(DETAIL_BARS, 6_000, 5)).toBe(1);
+    expect(detailSpan(DETAIL_BARS, 1, 5)).toBe(1);
   });
 
   it("falls back rather than dividing by zero", () => {
-    for (const [bpm, dur] of [[0, 338], [12_800, 0], [0, 0]] as const) {
-      const span = detailSpan(DETAIL_BARS, bpm, dur);
+    for (const [tempo, dur] of [[0, 338], [1, 0], [0, 0]] as const) {
+      const span = detailSpan(DETAIL_BARS, tempo, dur);
       expect(span).toBeGreaterThan(0);
       expect(span).toBeLessThanOrEqual(1);
     }
@@ -847,6 +847,15 @@ describe("the tempo fader", () => {
     }
   });
 
+  it("a fader near a whole BPM lands on it, and on the track's own tempo", () => {
+    // 125 BPM track: 1.0238 plays at 127.98, caught at 128.
+    expect(snapTempo(1.0238, 12_500) * 125).toBeCloseTo(128, 9);
+    expect(snapTempo(1.03, 12_500)).toBe(1.03);
+    // 127.6 BPM track: its own tempo is not a whole BPM, and still catches.
+    expect(snapTempo(1.0005, 12_760)).toBe(1);
+    expect(snapTempo(1.0238, 0)).toBe(1.0238);
+  });
+
   it("a typed BPM is a tempo against the track's own", () => {
     expect(tempoForTypedBpm("130", 12_800)).toBeCloseTo(130 / 128, 6);
     expect(tempoForTypedBpm(" 128,5 ", 12_800)).toBeCloseTo(1.00390625, 6);
@@ -919,6 +928,22 @@ describe("wrapIntoLoop", () => {
     expect(wrapIntoLoop(2, 1, 2)).toBe(1);
     expect(wrapIntoLoop(2.25, 1, 2)).toBe(1.25);
     expect(wrapIntoLoop(4.5, 1, 2)).toBe(1.5);
+  });
+});
+
+describe("adjustLoopPoint", () => {
+  it("moves the chosen end only", () => {
+    expect(adjustLoopPoint(1, 3, "in", 0.5, 10)).toEqual([1.5, 3]);
+    expect(adjustLoopPoint(1, 3, "out", -0.5, 10)).toEqual([1, 2.5]);
+  });
+  it("keeps in before out by the shortest loop", () => {
+    expect(adjustLoopPoint(1, 3, "in", 5, 10)).toEqual([3 - LOOP_ADJUST_MIN_SECONDS, 3]);
+    expect(adjustLoopPoint(1, 3, "out", -5, 10)).toEqual([1, 1 + LOOP_ADJUST_MIN_SECONDS]);
+  });
+  it("stays inside the track", () => {
+    expect(adjustLoopPoint(1, 3, "in", -5, 10)).toEqual([0, 3]);
+    expect(adjustLoopPoint(1, 3, "out", 50, 10)).toEqual([1, 10]);
+    expect(adjustLoopPoint(1, 3, "out", 50, 0)).toEqual([1, 53]);
   });
 });
 

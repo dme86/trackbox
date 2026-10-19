@@ -65,6 +65,8 @@ export interface HotCueDeck {
   activeLoop?: (() => { inSeconds: number; outSeconds: number } | null) | undefined;
   /** Leaves the playing loop, keeping it for RELOOP. */
   exitLoop?: (() => void) | undefined;
+  /** Sets and starts a loop: a hot cue saved as a loop is one. */
+  setLoop?: ((inSeconds: number, outSeconds: number) => void) | undefined;
   /**
    * The grid to snap a new hot cue to, when Q is on, or `null`. The same
    * rule CUE follows: with Q on a cue lands on the nearest beat, which is
@@ -98,6 +100,7 @@ export interface HotCueActions {
 export function useHotCues(deck: HotCueDeck): HotCueActions {
   const {
     trackId, cues, positionSeconds, seek, play, playing, jumpAt, activeLoop, exitLoop, quantiseTo, readOnly, onError,
+    setLoop,
   } = deck;
   const canEdit = trackId !== null && !readOnly;
   const write = useCueWriter(onError);
@@ -107,6 +110,21 @@ export function useHotCues(deck: HotCueDeck): HotCueActions {
   const press = useCallback(
     (letter: string) => {
       const cue = hotCue(cues, letter);
+      if (cue && cue.outMs > cue.positionMs && setLoop) {
+        // A hot loop: it starts at its in point and goes round, and pressed
+        // again while it plays it lets go, as rekordbox's pads do.
+        const loop = activeLoop?.() ?? null;
+        const inSeconds = cue.positionMs / 1000;
+        const outSeconds = cue.outMs / 1000;
+        if (loop && Math.abs(loop.inSeconds - inSeconds) < 0.001 && Math.abs(loop.outSeconds - outSeconds) < 0.001) {
+          exitLoop?.();
+          return;
+        }
+        seek(inSeconds);
+        setLoop(inSeconds, outSeconds);
+        play();
+        return;
+      }
       if (cue) {
         // Calling a hot cue is a jump that plays: from pause rekordbox starts
         // playback at the cue (manual p.102), and a playing deck carries on
@@ -136,7 +154,7 @@ export function useHotCues(deck: HotCueDeck): HotCueActions {
       const positionMs = Math.round(quantiseTo ? nearestBeatMs(quantiseTo, at) : at);
       write((edits) => edits.addCue(trackId, { hot: letter }, positionMs));
     },
-    [cues, seek, play, playing, jumpAt, activeLoop, exitLoop, canEdit, trackId, positionSeconds, quantiseTo, write],
+    [cues, seek, play, playing, jumpAt, activeLoop, exitLoop, canEdit, trackId, positionSeconds, quantiseTo, write, setLoop],
   );
 
   const clear = useCallback(

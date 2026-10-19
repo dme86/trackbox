@@ -14,14 +14,86 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::{DeckError, Result};
 
-/// Fills a stereo interleaved buffer. Called on the audio thread, so it obeys
-/// the realtime rules: no allocation, no lock, no syscall, no panic.
-pub type Render = Box<dyn FnMut(&mut [f32]) + Send>;
+/// Fills a stereo interleaved master buffer and, after it, a stereo cue
+/// buffer for the headphones. The cue buffer is the same length as the
+/// master, or empty when the sink has nowhere to send it. Called on the audio
+/// thread, so it obeys the realtime rules: no allocation, no lock, no
+/// syscall, no panic.
+pub type Render = Box<dyn FnMut(&mut [f32], &mut [f32]) + Send>;
+
+/// Where the headphones are heard, if anywhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CueRouting {
+    /// No headphones: the master alone, on the first two outputs.
+    #[default]
+    Off,
+    /// One device with separate output pairs, counted from zero. A DDJ-FLX4
+    /// is master on 0/1 and headphones on 2/3.
+    Lanes { master: (u16, u16), cue: (u16, u16) },
+    /// One stereo output: the cue in the left ear and the master in the
+    /// right, each summed to mono.
+    Split,
+}
+
+impl CueRouting {
+    /// How many outputs a device needs to carry this.
+    #[must_use]
+    pub fn channels_needed(self) -> u16 {
+        match self {
+            Self::Off | Self::Split => 2,
+            Self::Lanes { master, cue } => {
+                master.0.max(master.1).max(cue.0).max(cue.1).saturating_add(1)
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn has_cue(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// What output `at` carries, given one frame of master and of cue.
+    fn lane(self, at: usize, master: (f32, f32), cue: (f32, f32)) -> f32 {
+        match self {
+            Self::Off => match at {
+                0 => master.0,
+                1 => master.1,
+                _ => 0.0,
+            },
+            Self::Split => match at {
+                0 => f32::midpoint(cue.0, cue.1),
+                1 => f32::midpoint(master.0, master.1),
+                _ => 0.0,
+            },
+            Self::Lanes { master: (ml, mr), cue: (cl, cr) } => {
+                let at = u16::try_from(at).unwrap_or(u16::MAX);
+                if at == ml {
+                    master.0
+                } else if at == mr {
+                    master.1
+                } else if at == cl {
+                    cue.0
+                } else if at == cr {
+                    cue.1
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
 
 pub trait Sink: Send + Sync {
     fn health(&self) -> AudioHealth { AudioHealth::default() }
+    /// Where the headphones actually went, which is not always what was asked
+    /// for: a device with too few outputs is opened without them.
+    fn cue_routing(&self) -> CueRouting { CueRouting::Off }
     /// The rate everything downstream of the resampler runs at.
     fn sample_rate(&self) -> u32;
+    /// Whether the output has stopped for good — unplugged, or reconfigured
+    /// under the stream — so nothing will be heard until the engine is
+    /// rebuilt on a device that is there.
+    fn lost(&self) -> bool { false }
     /// Starts pulling. Called when a deck starts playing.
     fn start(&self) -> Result<()>;
     /// Stops pulling, so an idle app costs nothing.
@@ -58,7 +130,10 @@ pub struct CpalSink {
     health: Arc<HealthMeter>,
     ask: Sender<Ask>,
     sample_rate: u32,
+    routing: CueRouting,
     running: AtomicBool,
+    /// Set by the stream's error callback, which is not the audio callback.
+    lost: Arc<AtomicBool>,
 }
 
 impl CpalSink {
@@ -71,9 +146,8 @@ impl CpalSink {
     ///
     /// By id rather than by position: a device list renumbers whenever
     /// something is plugged in, and a stored index would pick a different box
-    /// after a reboot. An id that is no longer there falls back to the default
-    /// rather than refusing to play — a missing interface should not be a
-    /// silent app.
+    /// after a reboot. An id that is not there is `DeckError::Disconnected`,
+    /// never the default: see `pick`.
     pub fn open_named(render: Render, wanted: Option<String>) -> Result<Self> {
         Self::open_with(render, wanted, StreamWish::default())
     }
@@ -90,23 +164,31 @@ impl CpalSink {
 
         let health = Arc::new(HealthMeter::default());
         let callback_health = Arc::clone(&health);
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&lost);
         std::thread::Builder::new()
             .name("rbl-deck-device".to_owned())
-            .spawn(move || device_thread(render, wanted.as_deref(), wish, &ask_rx, &ready_tx, callback_health))
+            .spawn(move || device_thread(render, wanted.as_deref(), wish, &ask_rx, &ready_tx, callback_health, flag))
             .map_err(DeckError::Io)?;
 
         // The rate decides what the decoders resample to, so opening is not
         // finished until the device has said what it is.
-        let sample_rate = ready_rx
+        let (sample_rate, routing) = ready_rx
             .recv()
             .map_err(|_| DeckError::Device("the audio thread stopped while starting".to_owned()))??;
 
-        Ok(Self { health, ask: ask_tx, sample_rate, running: AtomicBool::new(false) })
+        Ok(Self { health, ask: ask_tx, sample_rate, routing, running: AtomicBool::new(false), lost })
     }
 }
 
 impl Sink for CpalSink {
     fn health(&self) -> AudioHealth { self.health.snapshot(self.running.load(Ordering::Relaxed)) }
+    fn lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+    fn cue_routing(&self) -> CueRouting {
+        self.routing
+    }
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -142,12 +224,13 @@ fn device_thread(
     wanted: Option<&str>,
     wish: StreamWish,
     ask: &Receiver<Ask>,
-    ready: &Sender<Result<u32>>,
+    ready: &Sender<Result<(u32, CueRouting)>>,
     health: Arc<HealthMeter>,
+    lost: Arc<AtomicBool>,
 ) {
-    let stream = match build_stream(render, wanted, wish, health) {
-        Ok((stream, rate)) => {
-            if ready.send(Ok(rate)).is_err() {
+    let stream = match build_stream(render, wanted, wish, health, lost) {
+        Ok((stream, rate, routing)) => {
+            if ready.send(Ok((rate, routing))).is_err() {
                 return;
             }
             stream
@@ -232,24 +315,70 @@ pub fn default_output_device() -> Option<AudioDevice> {
 }
 
 /// What Preferences › Audio asks of the device: a sample rate and a buffer
-/// size, either of which may be left to the device.
+/// size, either of which may be left to the device, and where the headphones go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamWish {
     pub sample_rate: Option<u32>,
     /// Frames per callback.
     pub buffer_frames: Option<u32>,
+    pub cue: CueRouting,
+}
+
+/// The sample formats `build` can write.
+fn writable(format: cpal::SampleFormat) -> bool {
+    matches!(
+        format,
+        cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16 | cpal::SampleFormat::I32
+    )
 }
 
 /// The device's configuration for a wish: its default, at the wished rate
-/// if it offers that rate, with the wished buffer if that is in its range.
-fn configure(device: &cpal::Device, wish: StreamWish) -> Result<(cpal::StreamConfig, cpal::SampleFormat)> {
+/// if it offers that rate, with the wished buffer if that is in its range,
+/// and widened to enough outputs for the headphones if it has them.
+///
+/// A device's default configuration can be stereo even when it has more
+/// outputs, so separate headphone lanes are looked for among everything it
+/// supports. A device without enough outputs is opened without headphones,
+/// with a warning, and the routing that comes back says so.
+fn configure(
+    device: &cpal::Device,
+    wish: StreamWish,
+) -> Result<(cpal::StreamConfig, cpal::SampleFormat, CueRouting)> {
     let supported = device
         .default_output_config()
         .map_err(|e| DeckError::Device(e.to_string()))?;
-    let format = supported.sample_format();
-    let buffer_range = *supported.buffer_size();
+    let mut format = supported.sample_format();
+    let mut buffer_range = *supported.buffer_size();
     let mut config: cpal::StreamConfig = supported.into();
+    let mut routing = wish.cue;
 
+    let needed = routing.channels_needed();
+    if config.channels < needed {
+        let rate = wish.sample_rate.unwrap_or(config.sample_rate);
+        let wider = device.supported_output_configs().ok().and_then(|ranges| {
+            ranges
+                .filter(|range| {
+                    range.channels() >= needed
+                        && writable(range.sample_format())
+                        && range.min_sample_rate() <= rate
+                        && rate <= range.max_sample_rate()
+                })
+                .min_by_key(|range| (range.channels(), range.sample_format() != format))
+        });
+        if let Some(range) = wider {
+            config.channels = range.channels();
+            config.sample_rate = rate;
+            format = range.sample_format();
+            buffer_range = *range.buffer_size();
+        } else {
+            tracing::warn!(
+                needed,
+                offered = config.channels,
+                "the audio device has too few outputs for separate headphones; opening without them"
+            );
+            routing = CueRouting::Off;
+        }
+    }
     if let Some(rate) = wish.sample_rate {
         // Among the device's ranges, one at the default format that covers
         // the rate; a device that cannot run there keeps its default.
@@ -281,45 +410,65 @@ fn configure(device: &cpal::Device, wish: StreamWish) -> Result<(cpal::StreamCon
             }
         }
     }
-    Ok((config, format))
+    Ok((config, format, routing))
 }
 
-fn build_stream(render: Render, wanted: Option<&str>, wish: StreamWish, health: Arc<HealthMeter>) -> Result<(cpal::Stream, u32)> {
-    let host = cpal::default_host();
-    // The named one if it is there, and the default if it is not: a device
-    // that has been unplugged since it was chosen should not stop the app
-    // making a sound.
-    let device = wanted
-        .and_then(|id| {
-            host.output_devices().ok().and_then(|mut devices| {
-                devices.find(|device| device.id().is_ok_and(|found| found.to_string() == id))
-            })
-        })
-        .or_else(|| host.default_output_device())
-        .ok_or(DeckError::NoDevice)?;
-    if let (Some(wanted), Ok(opened)) = (wanted, device.id()) {
-        if wanted != opened.to_string() {
-            tracing::warn!(wanted, opened = %device, "that audio device is not here; using another");
-        }
+/// Which output to open. Nothing chosen is the host's default, which the OS
+/// moves for us when it changes. Something chosen is that device or an error:
+/// falling back would move a live set onto whatever else is there — the
+/// laptop's speakers — which is worse than a silence the DJ is told about.
+fn pick<D>(
+    wanted: Option<&str>,
+    devices: impl IntoIterator<Item = (String, D)>,
+    default: impl FnOnce() -> Option<D>,
+) -> Result<D> {
+    match wanted {
+        None => default().ok_or(DeckError::NoDevice),
+        Some(id) => devices
+            .into_iter()
+            .find_map(|(found, device)| (found == id).then_some(device))
+            .ok_or_else(|| DeckError::Disconnected(id.to_owned())),
     }
-    let (config, format) = configure(&device, wish)?;
+}
+
+fn build_stream(
+    render: Render,
+    wanted: Option<&str>,
+    wish: StreamWish,
+    health: Arc<HealthMeter>,
+    lost: Arc<AtomicBool>,
+) -> Result<(cpal::Stream, u32, CueRouting)> {
+    let host = cpal::default_host();
+    let devices = host
+        .output_devices()
+        .into_iter()
+        .flatten()
+        .filter_map(|device| Some((device.id().ok()?.to_string(), device)));
+    let device = pick(wanted, devices, || host.default_output_device())?;
+    let (config, format, routing) = configure(&device, wish)?;
     let rate = config.sample_rate;
     let channels = config.channels;
-    tracing::debug!(device = %device, rate, buffer = ?config.buffer_size, "audio output opened");
+    tracing::debug!(device = %device, rate, channels, ?routing, buffer = ?config.buffer_size, "audio output opened");
 
-    let error = |e: cpal::Error| match e.kind() {
+    // Called by cpal off the audio callback on Core Audio, which pauses the
+    // stream itself before reporting a disconnect; on any host a store is safe.
+    let error = move |e: cpal::Error| match e.kind() {
         cpal::ErrorKind::Xrun => tracing::warn!(error = %e, "audio buffer underrun or overrun"),
         cpal::ErrorKind::DeviceChanged => tracing::info!(error = %e, "audio output changed"),
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+            lost.store(true, Ordering::Release);
+            tracing::error!(error = %e, "the audio output went away; output stopped");
+        }
         _ => tracing::error!(error = %e, "audio device error"),
     };
     let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, render, error, health),
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, render, error, health),
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, render, error, health),
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, render, error, health),
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, routing, render, error, health),
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, routing, render, error, health),
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, routing, render, error, health),
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, routing, render, error, health),
         other => Err(DeckError::Device(format!("this device wants {other} samples, which we do not write"))),
     }?;
-    Ok((stream, rate))
+    Ok((stream, rate, routing))
 }
 
 /// The device's own buffer never reaches this in practice; a callback asking
@@ -329,9 +478,9 @@ const SCRATCH_FRAMES: usize = 4096;
 fn build<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    channels: u16,
+    routing: CueRouting,
     mut render: Render,
-    error: fn(cpal::Error),
+    error: impl FnMut(cpal::Error) + Send + 'static,
     health: Arc<HealthMeter>,
 ) -> Result<cpal::Stream>
 where
@@ -340,7 +489,8 @@ where
     // Allocated here, on the control thread, and only written to inside the
     // callback: the callback itself never allocates.
     let mut scratch = vec![0.0_f32; SCRATCH_FRAMES * 2];
-    let lanes = channels.max(1) as usize;
+    let mut cue_scratch = vec![0.0_f32; if routing.has_cue() { SCRATCH_FRAMES * 2 } else { 0 }];
+    let lanes = config.channels.max(1) as usize;
     let rate = config.sample_rate;
 
     device
@@ -359,13 +509,21 @@ where
                         continue;
                     };
                     stereo.fill(0.0);
-                    render(stereo);
-                    // Stereo into however many lanes the device has: a third
-                    // and further channels stay silent rather than repeating.
-                    for (frame, lane) in stereo.chunks_exact(2).zip(chunk.chunks_mut(lanes)) {
+                    let cue = cue_scratch.get_mut(..frames * 2).unwrap_or(&mut []);
+                    render(stereo, cue);
+                    // Master and cue into however many lanes the device has:
+                    // lanes neither is routed to stay silent.
+                    for (i, lane) in chunk.chunks_mut(lanes).enumerate() {
+                        let pair = |buffer: &[f32]| {
+                            (
+                                buffer.get(i * 2).copied().unwrap_or(0.0),
+                                buffer.get(i * 2 + 1).copied().unwrap_or(0.0),
+                            )
+                        };
+                        let master = pair(&*stereo);
+                        let heard = pair(&*cue);
                         for (at, sample) in lane.iter_mut().enumerate() {
-                            let value = if at < 2 { frame.get(at).copied().unwrap_or(0.0) } else { 0.0 };
-                            *sample = T::from_sample(value);
+                            *sample = T::from_sample(routing.lane(at, master, heard));
                         }
                     }
                 }
@@ -385,6 +543,7 @@ pub struct NullSink {
     /// Frames still to be pulled after a stop, so a fade has somewhere to
     /// happen. The device does the same thing: see `LINGER`.
     linger: AtomicUsize,
+    lost: AtomicBool,
 }
 
 impl NullSink {
@@ -394,7 +553,13 @@ impl NullSink {
             sample_rate,
             running: AtomicBool::new(false),
             linger: AtomicUsize::new(0),
+            lost: AtomicBool::new(false),
         }
+    }
+
+    /// Unplugs it: from here on it is never pulled again, as a dead stream is not.
+    pub fn lose(&self) {
+        self.lost.store(true, Ordering::SeqCst);
     }
 
     /// Pulls `frames` stereo frames, as a device callback would.
@@ -403,18 +568,31 @@ impl NullSink {
     /// still pulled for `LINGER`, which is where the decks fade themselves
     /// out; the real device behaves the same way.
     pub fn pull(&self, frames: usize) -> Vec<f32> {
+        self.pull_both(frames, false).0
+    }
+
+    /// The same, with headphones: the master and the cue, both stereo.
+    pub fn pull_with_cue(&self, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        self.pull_both(frames, true)
+    }
+
+    fn pull_both(&self, frames: usize, phones: bool) -> (Vec<f32>, Vec<f32>) {
         let mut out = vec![0.0_f32; frames * 2];
+        let mut cue = vec![0.0_f32; if phones { frames * 2 } else { 0 }];
+        if self.lost.load(Ordering::SeqCst) {
+            return (out, cue);
+        }
         if !self.running.load(Ordering::SeqCst) {
             let left = self.linger.load(Ordering::SeqCst);
             if left == 0 {
-                return out;
+                return (out, cue);
             }
             self.linger.store(left.saturating_sub(frames), Ordering::SeqCst);
         }
         if let Ok(mut render) = self.render.lock() {
-            render(&mut out);
+            render(&mut out, &mut cue);
         }
-        out
+        (out, cue)
     }
 
     pub fn running(&self) -> bool {
@@ -425,6 +603,10 @@ impl NullSink {
 impl Sink for NullSink {
     fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    fn lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
     }
 
     fn start(&self) -> Result<()> {
@@ -442,15 +624,91 @@ impl Sink for NullSink {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_stopped_null_sink_gives_silence_and_does_not_pull() {
-        let sink = NullSink::new(44_100, Box::new(|out| out.fill(0.5)));
+        let sink = NullSink::new(44_100, Box::new(|out, _cue| out.fill(0.5)));
         assert_eq!(sink.pull(4), vec![0.0; 8]);
         sink.start().expect("start");
         assert_eq!(sink.pull(4), vec![0.5; 8]);
+    }
+
+    #[test]
+    fn a_null_sink_hands_over_a_cue_buffer_only_when_asked() {
+        let sink = NullSink::new(
+            44_100,
+            Box::new(|out, cue| {
+                out.fill(0.5);
+                cue.fill(0.25);
+            }),
+        );
+        sink.start().expect("start");
+        assert_eq!(sink.pull(4), vec![0.5; 8]);
+        assert_eq!(sink.pull_with_cue(4), (vec![0.5; 8], vec![0.25; 8]));
+    }
+
+    #[test]
+    fn a_lost_null_sink_is_never_pulled_again() {
+        let sink = NullSink::new(44_100, Box::new(|out, _cue| out.fill(0.5)));
+        sink.start().expect("start");
+        assert!(!sink.lost());
+        sink.lose();
+        assert!(sink.lost());
+        assert_eq!(sink.pull(4), vec![0.0; 8]);
+    }
+
+    #[test]
+    fn nothing_chosen_is_the_default_and_its_absence_is_no_device() {
+        let none = std::iter::empty::<(String, &str)>();
+        assert_eq!(pick(None, none.clone(), || Some("speakers")).unwrap(), "speakers");
+        assert!(matches!(pick(None, none, || None::<&str>), Err(DeckError::NoDevice)));
+    }
+
+    #[test]
+    fn a_chosen_device_is_opened_when_it_is_there() {
+        let devices = [("builtin".to_owned(), "speakers"), ("flx4".to_owned(), "DDJ-FLX4")];
+        assert_eq!(pick(Some("flx4"), devices, || Some("speakers")).unwrap(), "DDJ-FLX4");
+    }
+
+    #[test]
+    fn a_chosen_device_that_is_gone_never_falls_back_to_the_default() {
+        let devices = [("builtin".to_owned(), "speakers")];
+        let picked = pick(Some("flx4"), devices, || Some("speakers"));
+        assert!(matches!(picked, Err(DeckError::Disconnected(ref id)) if id == "flx4"), "{picked:?}");
+    }
+
+    #[test]
+    fn off_is_the_master_on_the_first_pair_and_nothing_else() {
+        let master = (0.1, 0.2);
+        let cue = (0.3, 0.4);
+        let lanes: Vec<f32> = (0..4).map(|at| CueRouting::Off.lane(at, master, cue)).collect();
+        assert_eq!(lanes, vec![0.1, 0.2, 0.0, 0.0]);
+        assert_eq!(CueRouting::Off.channels_needed(), 2);
+        assert!(!CueRouting::Off.has_cue());
+    }
+
+    #[test]
+    fn lanes_put_master_and_cue_where_they_are_asked_for() {
+        // The DDJ-FLX4: master on 1/2, headphones on 3/4.
+        let flx4 = CueRouting::Lanes { master: (0, 1), cue: (2, 3) };
+        let lanes: Vec<f32> = (0..6).map(|at| flx4.lane(at, (0.1, 0.2), (0.3, 0.4))).collect();
+        assert_eq!(lanes, vec![0.1, 0.2, 0.3, 0.4, 0.0, 0.0]);
+        assert_eq!(flx4.channels_needed(), 4);
+
+        let swapped = CueRouting::Lanes { master: (2, 3), cue: (0, 1) };
+        let lanes: Vec<f32> = (0..4).map(|at| swapped.lane(at, (0.1, 0.2), (0.3, 0.4))).collect();
+        assert_eq!(lanes, vec![0.3, 0.4, 0.1, 0.2]);
+    }
+
+    #[test]
+    fn split_is_the_cue_left_and_the_master_right_each_in_mono() {
+        let lanes: Vec<f32> =
+            (0..3).map(|at| CueRouting::Split.lane(at, (0.2, 0.4), (0.6, 0.8))).collect();
+        assert!((lanes[0] - 0.7).abs() < 1e-6, "cue: {}", lanes[0]);
+        assert!((lanes[1] - 0.3).abs() < 1e-6, "master: {}", lanes[1]);
+        assert_eq!(lanes[2], 0.0);
     }
 }

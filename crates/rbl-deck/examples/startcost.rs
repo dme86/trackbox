@@ -17,7 +17,7 @@ use rbl_deck::{CpalSink, Sink};
 fn main() {
     let calls = Arc::new(AtomicU64::new(0));
     let seen = Arc::clone(&calls);
-    let sink = CpalSink::open(Box::new(move |out: &mut [f32]| {
+    let sink = CpalSink::open(Box::new(move |out: &mut [f32], _cue: &mut [f32]| {
         out.fill(0.0);
         seen.fetch_add(1, Ordering::SeqCst);
     }))

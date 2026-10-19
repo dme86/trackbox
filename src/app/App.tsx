@@ -9,6 +9,7 @@ import { useShowWindowWhenReady } from "@/lib/windowReady";
 import { waveformKindOf } from "@/canvas";
 import { useAutoJoinLink } from "@/store/useAutoJoinLink";
 import { useEventCallback } from "@/store/useEventCallback";
+import { useControllerIntent } from "@/store/useControllerIntent";
 /**
  * Export-mode shell.
  *
@@ -18,7 +19,7 @@ import { useEventCallback } from "@/store/useEventCallback";
  */
 import type { TrackSearchField } from "@/lib/search";
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { droppedFilePaths, getBackend, subscribeNativeFileDrops } from "@/ipc/client";
 import type {
   Backend, DeckId, Device, ImportReport, LibraryProblem, LibrarySummary, RowDto, SortColumn, TrackField, TreeNode, ViewSpec,
@@ -34,7 +35,7 @@ import { detectPlatform, dispatch, isTyping, menuAccelerator } from "@/lib/short
 import { hasEditHistory, runEditHistory, setLibraryEditHistory } from "@/lib/editHistory";
 import { transposeKey } from "@/lib/camelot";
 import { gainToKnob, KNOB_FULL, knobToGain } from "@/lib/volume";
-import { clampWidth, TREE_BOUNDS } from "@/lib/splitter";
+import { clampWidth, deckBounds, TREE_BOUNDS } from "@/lib/splitter";
 import { exportSummary } from "@/lib/exportSummary";
 import { deviceId, devicePath, renamedDevice } from "@/lib/devices";
 import { DEVICE_ASKS, deviceNodeId, deviceParentFor, devicePlaylistsOf, isDeviceLibraryKind, parseDeviceNodeId } from "@/lib/deviceLibrary";
@@ -51,12 +52,14 @@ import { useLimiter } from "@/store/useLimiter";
 import { onPreviewError, stopPreview } from "@/store/usePreview";
 import { useUpdater } from "@/store/useUpdater";
 import { UpdateReadyNotice } from "@/views/update/UpdateReadyNotice";
+import noticeStyles from "@/views/update/UpdateReadyNotice.module.css";
 import { MasterOutputProvider, MasterOutputConnection, useMasterControls, useMasterDisplay } from "@/store/MasterOutput";
-import { asLayout, deckCount, isFullDeck, type PlayerLayout } from "@/lib/layout";
+import { asLayout, DECK_FLOOR_TOKEN, deckArrangement, deckCount, isFullDeck, type PlayerLayout } from "@/lib/layout";
 import { asWaveformOrientation, asWorkspaceMode, layoutForWorkspace, readExportLayout, WORKSPACE_MODE_KEY, EXPORT_LAYOUT_KEY, PERFORMANCE_WAVEFORM_KEY, type WaveformOrientation, type WorkspaceMode } from "@/lib/workspaceMode";
 import { FIELD_LABEL, InfoPanel } from "@/views/info/InfoPanel";
 import { SubBrowser } from "@/views/subbrowser/SubBrowser";
 import { RightRail } from "@/views/browser/RightRail";
+import { SuggestionPanel } from "@/views/browser/SuggestionPanel";
 import { useColumns, type ColumnContext } from "@/store/useColumns";
 import { useExplorer } from "@/store/useExplorer";
 import { importLoose, isLooseId } from "@/lib/explorer";
@@ -106,12 +109,20 @@ const MissingFileManager = lazy(() => import("@/views/library/MissingFileManager
 
 const SHOW_MAIN_SUPPORT = true;
 
+/** Where the controller's BROWSE knob turns: the source rail, the tree, the track list, or Track Suggestion. */
+type BrowseZone = "rail" | "tree" | "list" | "suggest";
+
 /**
  * How many tracks one backend call handles in a long operation. Each call is
  * one database write, so a slice is the unit the status bar's progress moves
  * in and the longest a Stop waits.
  */
 const ADD_SLICE = 100;
+
+/** The deck band's height, from its gutter: the decks less the gutter itself. */
+function bandHeight(gutter: HTMLElement): number {
+  return (gutter.parentElement?.offsetHeight ?? 0) - gutter.offsetHeight;
+}
 
 function ConnectedPreferences(props: Omit<React.ComponentProps<typeof Preferences>, "reduction" | "vu" | "peakLeft" | "peakRight">) {
   const master = useMasterDisplay();
@@ -290,6 +301,14 @@ function AppBody() {
     }),
     [],
   );
+  const [deckPlaying, setDeckPlaying] = useState<Record<DeckId, boolean>>({ a: false, b: false });
+  const reportPlaying = useMemo(
+    () => ({
+      a: (on: boolean) => setDeckPlaying((p) => (p.a === on ? p : { ...p, a: on })),
+      b: (on: boolean) => setDeckPlaying((p) => (p.b === on ? p : { ...p, b: on })),
+    }),
+    [],
+  );
   const leaderBpmX100 = playingBpm[syncMaster];
   /** Each deck's key shift in semitones, so the Traffic Light reads the key the deck sounds in. */
   const [keyShift, setKeyShift] = useState<Record<DeckId, number>>({ a: 0, b: 0 });
@@ -398,6 +417,13 @@ function AppBody() {
   const [treeWidth, setTreeWidth] = useState(restored.treeWidth);
   const bodyRef = useRef<HTMLDivElement>(null);
   const dragFrom = useRef<{ x: number; width: number } | null>(null);
+  // The decks' height, dragged on the gutter under them.
+  const [deckHeights, setDeckHeights] = useState(restored.deckHeights);
+  const [deckSpace, setDeckSpace] = useState(0);
+  const windowRef = useRef<HTMLDivElement>(null);
+  const decksRef = useRef<HTMLDivElement>(null);
+  const linkStripRef = useRef<HTMLDivElement>(null);
+  const deckDrag = useRef<{ y: number; height: number } | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const clock = useClock();
   // The table's layout follows the kind of thing being browsed, as
@@ -549,6 +575,28 @@ function AppBody() {
     setWorkspaceMode(next);
     try { localStorage.setItem(WORKSPACE_MODE_KEY, next); } catch { /* Session remains usable. */ }
   }, [layout, workspaceMode]);
+  // A controller plugged in during EXPORT offers PERFORMANCE once; it never switches by itself.
+  const [controllerHint, setControllerHint] = useState<string | null>(null);
+  if (controllerHint !== null && workspaceMode === "performance") setControllerHint(null);
+  useEffect(() => {
+    let live = true;
+    let last: string | null = null;
+    let stop: (() => void) | undefined;
+    const seen = (name: string | null) => {
+      if (name !== last) setControllerHint(name);
+      last = name;
+    };
+    void getBackend().then(async (backend) => {
+      stop = backend.onControllerStatus((status) => seen(status.name));
+      const status = await backend.controllerStatus();
+      if (live) seen(status.name);
+      else stop();
+    }).catch(() => {});
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
 
   const chooseLayout = useCallback((next: PlayerLayout) => {
     // Choosing an EXPORT-specific layout explicitly exits PERFORMANCE.
@@ -588,8 +636,51 @@ function AppBody() {
     if (!twoDecks || otherTrackId === null) return;
     setSyncMasterState(syncMaster === "a" ? "b" : "a");
   }, [syncMaster, masterTrackId, otherTrackId, twoDecks]);
+  /*
+   * MASTER goes to the deck that is heard: when the master stops, or the other
+   * deck starts while the master is stopped. Only on those changes, so a
+   * MASTER pressed on a stopped deck stays, and a pause keeps it where it is.
+   */
+  const playingHeld = useRef(deckPlaying);
+  useEffect(() => {
+    const before = playingHeld.current;
+    playingHeld.current = deckPlaying;
+    const other: DeckId = syncMaster === "a" ? "b" : "a";
+    const masterStopped = before[syncMaster] && !deckPlaying[syncMaster];
+    const otherStarted = !before[other] && deckPlaying[other];
+    if (!twoDecks || deckPlaying[syncMaster] || !deckPlaying[other]) return;
+    if (masterStopped || otherStarted) setSyncMasterState(other);
+  }, [deckPlaying, syncMaster, twoDecks]);
   const trafficTrack = trafficDeck === "b" ? playerTrackB : playerTrack;
   const trafficKey = trafficTrack ? transposeKey(trafficTrack.key, keyShift[trafficDeck]) : null;
+  // Track Suggestion works out of the master deck's track, as it sounds now.
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const suggestDeck: DeckId = twoDecks ? syncMaster : "a";
+  const suggestTrack = suggestDeck === "b" ? playerTrackB : playerTrack;
+  const suggestReference = useMemo(() => (suggestTrack ? {
+    id: suggestTrack.id,
+    title: suggestTrack.title,
+    hasArtwork: suggestTrack.hasArtwork,
+    deck: suggestDeck,
+    key: transposeKey(suggestTrack.key, keyShift[suggestDeck]),
+    bpmX100: playingBpm[suggestDeck] ?? suggestTrack.bpmX100,
+    genre: suggestTrack.genre,
+    artist: suggestTrack.artist,
+  } : null), [suggestTrack, suggestDeck, keyShift, playingBpm]);
+  const onDecks = useMemo(
+    () => [playerTrack?.id, playerTrackB?.id].filter((id): id is string => id !== undefined),
+    [playerTrack, playerTrackB],
+  );
+  // What the controller's BROWSE knob turns: pressing it moves on to the next.
+  const [browseZone, setBrowseZone] = useState<BrowseZone>("list");
+  const [browsing, setBrowsing] = useState(false);
+  const zone: BrowseZone = browseZone === "suggest" && !suggestOpen ? "list" : browseZone;
+  useControllerIntent((intent) => {
+    if (intent.type !== "browsePress" || intent.shift) return;
+    const zones: BrowseZone[] = suggestOpen ? ["rail", "tree", "list", "suggest"] : ["rail", "tree", "list"];
+    setBrowsing(true);
+    setBrowseZone(zones[(zones.indexOf(zone) + 1) % zones.length] ?? "list");
+  });
   const master = useMasterControls();
   // Read at start so the remembered setting reaches the engine before the
   // first thing plays, not when Settings is next opened.
@@ -605,6 +696,11 @@ function AppBody() {
       try {
         await backend.setAudioConfig(audioPrefs.sampleRate, audioPrefs.bufferSize);
         await backend.setMetronome(audioPrefs.metronomeSound, audioPrefs.metronomeVolume);
+        await backend.setCueRouting(
+          audioPrefs.headphones === "lanes"
+            ? { mode: "lanes", master: [0, 1], cue: [2, 3] }
+            : { mode: audioPrefs.headphones },
+        );
       } catch (e) {
         console.warn("the audio settings did not reach the engine", e);
       }
@@ -670,6 +766,22 @@ function AppBody() {
   jobError.current = (job, error) => refuse(error instanceof Error ? error.message : `${job.label} failed.`);
   // A waveform click whose track could not be previewed says why.
   useEffect(() => onPreviewError(refuse), [refuse]);
+  // An audio output lost mid-set says so at once, not on the next button press.
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void getBackend().then((backend) => {
+      if (live) {
+        stop = backend.onAudioDeviceLost(() => refuse(t(
+          "The audio output went away; both decks stopped. Reconnect it, or choose another output in Preferences › Audio.",
+        )));
+      }
+    }).catch(() => {});
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, [refuse, t]);
   // Choosing another playlist in the tree stops the preview, as rekordbox's
   // `BrowseListViewer::currentBrowseChanged` does when the tree's selected
   // item changed. The row with its stop button is gone with the old list,
@@ -979,6 +1091,88 @@ function AppBody() {
     dragFrom.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
   }, []);
+
+  const arrangement = deckArrangement(
+    layout,
+    workspaceMode === "performance" && performanceWaveform === "vertical",
+  );
+  const [deckFloor, browseMin] = useMemo(() => {
+    const root = getComputedStyle(document.documentElement);
+    const px = (token: string) => Number.parseFloat(root.getPropertyValue(token)) || 0;
+    return [arrangement === null ? 0 : px(DECK_FLOOR_TOKEN[arrangement]), px("--s-browse-min-h")];
+  }, [arrangement]);
+  const storedDeckHeight = arrangement === null ? undefined : deckHeights[arrangement];
+  const deckHeight = storedDeckHeight === undefined
+    ? undefined
+    : clampWidth(storedDeckHeight, deckBounds(deckSpace, deckFloor, browseMin));
+
+  // What the decks and the browser share: the window less the bars above and
+  // below them. Not decks plus browser, which overstates it once a short
+  // window has squeezed the browser to nothing.
+  const measureDeckSpace = useCallback(() => {
+    const win = windowRef.current;
+    const decks = decksRef.current;
+    if (!win || !decks) return;
+    const status = win.lastElementChild instanceof HTMLElement ? win.lastElementChild.offsetHeight : 0;
+    const below = status + (linkStripRef.current?.offsetHeight ?? 0);
+    const top = decks.getBoundingClientRect().top - win.getBoundingClientRect().top;
+    setDeckSpace(Math.round(win.clientHeight - top - below));
+  }, []);
+  useLayoutEffect(() => {
+    measureDeckSpace();
+    const win = windowRef.current;
+    const body = bodyRef.current;
+    if (!win || !body || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measureDeckSpace);
+    observer.observe(win);
+    observer.observe(body);
+    return () => {
+      observer.disconnect();
+    };
+  }, [arrangement, measureDeckSpace]);
+
+  const resizeDecks = useCallback((height: number) => {
+    if (arrangement === null) return;
+    setDeckHeights((was) => ({
+      ...was,
+      [arrangement]: clampWidth(height, deckBounds(deckSpace, deckFloor, browseMin)),
+    }));
+  }, [arrangement, deckSpace, deckFloor, browseMin]);
+
+  const resetDecks = useCallback(() => {
+    if (arrangement === null) return;
+    setDeckHeights((was) => Object.fromEntries(
+      Object.entries(was).filter(([key]) => key !== arrangement),
+    ));
+  }, [arrangement]);
+
+  const onDeckSplitterDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    deckDrag.current = { y: event.clientY, height: bandHeight(event.currentTarget) };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }, []);
+
+  const onDeckSplitterMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const from = deckDrag.current;
+    if (from) resizeDecks(from.height + event.clientY - from.y);
+  }, [resizeDecks]);
+
+  const onDeckSplitterUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    deckDrag.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }, []);
+
+  const onDeckSplitterKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 50 : 10;
+    const now = bandHeight(event.currentTarget);
+    if (event.key === "ArrowDown") resizeDecks(now + step);
+    else if (event.key === "ArrowUp") resizeDecks(now - step);
+    else if (event.key === "Home") resetDecks();
+    else return;
+    // Arrows here move the gutter, not the track list's selection.
+    event.preventDefault();
+    event.stopPropagation();
+  }, [resizeDecks, resetDecks]);
 
   /** Runs one edit and reports what happened, refusals included. */
   const runEdit = useCallback(
@@ -1340,6 +1534,10 @@ function AppBody() {
       b: () => deckLoaders.b(selectedRow),
     };
   }, [selectedRow, deckLoaders]);
+  // A controller's LOAD buttons: the highlighted track onto that deck.
+  useControllerIntent((intent) => {
+    if (intent.type === "load" && zone !== "suggest") loadSelectedInto[intent.deck]?.();
+  });
 
   /**
    * The tree's context menu, and the track's.
@@ -2282,6 +2480,7 @@ function AppBody() {
           setTreeWidth(clampWidth(305, bounds()));
           setSubWidth(DEFAULT_SUB_WIDTH);
           setSubTreeWidth(DEFAULT_SUB_TREE_WIDTH);
+          setDeckHeights({});
         }
       });
     });
@@ -2679,8 +2878,9 @@ function AppBody() {
       trafficLight,
       waveformZoom,
       dualControl: dual,
+      deckHeights,
     });
-  }, [sessionReady, treeWidth, selectedNode, treeExpansion, sortState, infoOpen, subOpen, filterOpen, tree, screen, layout, subWidth, subTreeWidth, trafficLight, waveformZoom, dual]);
+  }, [sessionReady, treeWidth, selectedNode, treeExpansion, sortState, infoOpen, subOpen, filterOpen, tree, screen, layout, subWidth, subTreeWidth, trafficLight, waveformZoom, dual, deckHeights]);
 
   // The last screen, handed to the table until the backend answers. Dropped as
   // soon as the library is up, so a stale row cannot outlive its replacement —
@@ -2754,7 +2954,7 @@ function AppBody() {
     <PreferencesProvider value={prefs}>
     <MasterOutputConnection mode={viewPrefs.vuMeter} />
     <ConfirmHost />
-    <div className={styles.window} data-platform={platform.linux ? "linux" : platform.mac ? "mac" : "windows"}>
+    <div ref={windowRef} className={styles.window} data-platform={platform.linux ? "linux" : platform.mac ? "mac" : "windows"}>
       <div
         className={styles.titleBar}
         data-testid="title-bar"
@@ -2779,9 +2979,12 @@ function AppBody() {
       {/* Full Browser draws no deck at all, and no gutter under one. */}
       {deckCount(layout) > 0 ? (
         <div
+          ref={decksRef}
           className={styles.decks}
           data-mixer={deckCount(layout) > 1 ? "" : undefined}
           data-orientation={workspaceMode === "performance" ? performanceWaveform : "horizontal"}
+          data-sized={deckHeight === undefined ? undefined : ""}
+          style={deckHeight === undefined ? undefined : { ["--decks-h" as string]: `${deckHeight}px` }}
         >
           {/* One transport column for the pair, as rekordbox draws it: deck A
               down from the top, deck B up from the bottom, and the mixer strip
@@ -2810,7 +3013,13 @@ function AppBody() {
           {/* Only with two decks. The one-player layout has no mixer and no
               crossfader, which is what rekordbox does — and what keeps a deck
               nobody has touched a fader for playing at the level of its file. */}
-          {deckCount(layout) > 1 ? <MixerStrip performance={workspaceMode === "performance"} /> : null}
+          {deckCount(layout) > 1 ? (
+            <MixerStrip
+              performance={workspaceMode === "performance"}
+              bpmX100={playingBpm}
+              masterDeck={syncMaster}
+            />
+          ) : null}
           <Player
             track={playerTrack}
             onEject={ejectA}
@@ -2842,6 +3051,7 @@ function AppBody() {
             publishGridFollow={publishGridFollow.a}
             onGridNudge={gridNudged.a}
             onKeyShift={reportKeyShift.a}
+            onPlaying={reportPlaying.a}
             readOnly={readOnly}
           />
           {deckCount(layout) > 1 ? (
@@ -2877,6 +3087,7 @@ function AppBody() {
               publishGridFollow={publishGridFollow.b}
               onGridNudge={gridNudged.b}
               onKeyShift={reportKeyShift.b}
+              onPlaying={reportPlaying.b}
               readOnly={readOnly}
             />
           ) : null}
@@ -2887,7 +3098,25 @@ function AppBody() {
               <DualZoom onZoom={zoomBoth} />
             </div>
           ) : null}
-          <div className={styles.playerGutter} aria-hidden />
+          {arrangement === null ? (
+            <div className={styles.playerGutter} aria-hidden />
+          ) : (
+            <div
+              className={styles.playerGutter}
+              role="separator"
+              tabIndex={0}
+              aria-orientation="horizontal"
+              aria-label="Resize the decks"
+              aria-valuenow={deckHeight ?? deckFloor}
+              aria-valuemin={deckFloor}
+              title={tip("Drag to make the waveforms taller and the track list shorter. Double-click resets.")}
+              onPointerDown={onDeckSplitterDown}
+              onPointerMove={onDeckSplitterMove}
+              onPointerUp={onDeckSplitterUp}
+              onDoubleClick={resetDecks}
+              onKeyDown={onDeckSplitterKey}
+            />
+          )}
         </div>
       ) : null}
       <div
@@ -2895,8 +3124,9 @@ function AppBody() {
         className={styles.body}
         ref={bodyRef}
         style={{ ["--tree-w" as string]: `${treeWidth}px` }}
-        data-info={infoOpen ? "" : undefined}
+        data-info={infoOpen || suggestOpen ? "" : undefined}
         data-sub={subOpen ? "" : undefined}
+        data-browsing={browsing ? "" : undefined}
       >
         <TreeView
           nodes={treeNodes}
@@ -2933,6 +3163,7 @@ function AppBody() {
           onDeviceCreate={createOnDevice}
           onDeviceRename={renameOnDevice}
           onDeviceDelete={deleteOnDevice}
+          browseFocus={zone === "rail" || zone === "tree" ? zone : null}
         />
         <div
           className={styles.splitter}
@@ -2988,6 +3219,7 @@ function AppBody() {
           onTrafficLight={setTrafficLight}
           trafficKey={trafficKey}
           onFocusedRow={deckLoaders.a}
+          browseFocus={zone === "list"}
           onSelectedRow={setSelectedRow}
           onDragTracks={setDraggedTracks}
           dragging={draggedTracks !== null}
@@ -3018,6 +3250,7 @@ function AppBody() {
           onColumnMove={cols.move}
           onColumnResize={cols.resize}
           onColumnToggle={cols.toggle}
+          onColumnRename={cols.rename}
           onColumnAutoSize={cols.autoSize}
           onColumnAutoSizeAll={cols.autoSizeEvery}
           seed={seed}
@@ -3042,19 +3275,35 @@ function AppBody() {
             list={subList}
           />
         ) : null}
-        {infoOpen ? (
-          <InfoPanel
-            // The browser's selection, as rekordbox's Information Window
-            // follows it; the deck's track only when nothing is selected —
-            // never for a multiple selection, which the panel shows as one.
-            track={infoSelection.length > 1 ? null : selectedRow ?? playerTrack}
-            selection={infoSelection}
-            readOnly={readOnly}
-            libraryGeneration={libraryGeneration}
-            onRate={rateTracks}
-            onComment={commentTracks}
-            onEdit={runEdit}
-          />
+        {infoOpen || suggestOpen ? (
+          <div className={styles.sidePanels}>
+            {infoOpen ? (
+              <InfoPanel
+                // The browser's selection, as rekordbox's Information Window
+                // follows it; the deck's track only when nothing is selected —
+                // never for a multiple selection, which the panel shows as one.
+                track={infoSelection.length > 1 ? null : selectedRow ?? playerTrack}
+                selection={infoSelection}
+                readOnly={readOnly}
+                libraryGeneration={libraryGeneration}
+                onRate={rateTracks}
+                onComment={commentTracks}
+                onEdit={runEdit}
+              />
+            ) : null}
+            {suggestOpen ? (
+              <SuggestionPanel
+                reference={suggestReference}
+                exclude={onDecks}
+                libraryGeneration={libraryGeneration}
+                keyDisplay={viewPrefs.keyDisplay}
+                decks={twoDecks ? ["a", "b"] : ["a"]}
+                onLoad={loadTrack}
+                browseFocus={zone === "suggest"}
+                onDragTracks={setDraggedTracks}
+              />
+            ) : null}
+          </div>
         ) : null}
         <RightRail
           className={styles.rightRail}
@@ -3062,6 +3311,8 @@ function AppBody() {
           onToggleInfo={() => setInfoOpen((open) => !open)}
           subOpen={subOpen}
           onToggleSub={() => setSubOpen((open) => !open)}
+          suggestOpen={suggestOpen}
+          onToggleSuggest={() => setSuggestOpen((open) => !open)}
         />
       </div>
       <Suspense fallback={null}>
@@ -3128,6 +3379,7 @@ function AppBody() {
             setTreeWidth(clampWidth(305, bounds()));
             setSubWidth(DEFAULT_SUB_WIDTH);
             setSubTreeWidth(DEFAULT_SUB_TREE_WIDTH);
+            setDeckHeights({});
           }}
           onClose={() => setSettingsOpen(null)}
         />
@@ -3151,7 +3403,7 @@ function AppBody() {
       {/* The LINK strip: present from the moment a player or mixer is heard,
           and the whole LINK interface from then on. It draws nothing at all
           before that, so the row it sits in collapses. */}
-      <div className={styles.linkStrip}>
+      <div className={styles.linkStrip} ref={linkStripRef}>
         <LinkDeckStrip
           peers={linkPeers}
           link={link}
@@ -3181,6 +3433,14 @@ function AppBody() {
             onWhatsNew={openWhatsNew}
             onDismiss={() => setUpdateNoticeVisible(false)}
           />
+        ) : controllerHint !== null ? (
+          <aside className={noticeStyles.notice} role="status" aria-live="polite">
+            <p><strong>{t("{name} connected", { name: controllerHint })}</strong></p>
+            <button type="button" className={noticeStyles.whatsNew} onClick={() => setControllerHint(null)}>{t("Dismiss")}</button>
+            <button type="button" className={noticeStyles.restart} onClick={() => chooseWorkspaceMode("performance")}>
+              {t("Switch to PERFORMANCE")}
+            </button>
+          </aside>
         ) : null}
         backupActivity={backupJob.error || backupJob.text}
         backupProgress={backupJob.progress.running ? backupJob.progress : undefined}

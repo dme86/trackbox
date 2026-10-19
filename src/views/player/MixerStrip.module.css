@@ -141,11 +141,15 @@
 .strip[data-performance] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  grid-template-areas: "header header" "a b" "cross cross";
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "header header" "a b" "cross cross" "fx fx";
   width: 236px;
   min-height: 0;
   height: 100%;
+  /* Taller decks leave the mixer at its own height, pinned to the top, so the
+     crossfader and BEAT FX stay under the EQs. */
+  max-height: var(--s-player-dual-h);
+  align-self: start;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 5px;
@@ -156,9 +160,11 @@
 .strip[data-performance] > :nth-child(2) { grid-area: a; }
 .strip[data-performance] > :nth-child(3) { grid-area: cross; }
 .strip[data-performance] > :nth-child(4) { grid-area: b; }
+.strip[data-performance] > :nth-child(5) { grid-area: fx; }
 
 .mixerHeader {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 5px;
@@ -169,7 +175,9 @@
   display: flex;
   gap: 2px;
 }
-.mixerHeader button {
+.mixerHeader button,
+.mixerHeader select,
+.beatFx button {
   background: var(--c-button);
   color: var(--c-text-dim);
   border: 1px solid var(--c-raised);
@@ -177,10 +185,48 @@
   font: inherit;
   cursor: pointer;
 }
-.mixerHeader button[aria-pressed="true"] {
+.mixerHeader select { color-scheme: dark; padding-block: 0; }
+.mixerHeader button[aria-pressed="true"],
+.beatFx button[aria-pressed="true"] {
   color: var(--c-accent);
   border-color: var(--c-accent);
 }
+.mixerHeader .rec { font-variant-numeric: tabular-nums; }
+.mixerHeader .rec[aria-pressed="true"] {
+  background: var(--c-error);
+  border-color: var(--c-error);
+  color: var(--c-on-error);
+}
+.mixerHeader .rec:disabled { cursor: default; opacity: 0.6; }
+.recError {
+  flex-basis: 100%;
+  color: var(--c-error);
+  font-weight: 400;
+}
+.beatFx {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 4px;
+  color: var(--c-text);
+  font-weight: 700;
+  background: var(--c-panel);
+  border: 1px solid var(--c-raised);
+}
+.beatFx > span:first-child { flex-basis: 100%; }
+.beatFx > div {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.beatFx .fxOn { padding: 4px 9px; }
+.beatFx .fxOn[aria-pressed="true"] {
+  background: var(--c-accent);
+  color: var(--c-icon-on);
+}
+.faderTrack[aria-disabled="true"] { opacity: 0.4; }
 .strip[data-performance] .channel {
   display: flex;
   min-width: 0;
@@ -206,20 +252,6 @@
   color: var(--c-text);
 }
 .killTitle { color: var(--c-mixer-label); }
-.eqControls {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  gap: 3px;
-}
-.eqBand {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  color: var(--c-text);
-  gap: 2px;
-}
-.eqBand input { width: 84px; max-width: 100%; accent-color: var(--c-accent); }
 .eqValue { color: var(--c-mixer-label); }
 .strip[data-performance] .bands {
   flex-direction: row;
@@ -227,21 +259,175 @@
   justify-content: center;
   gap: 3px;
 }
-.strip[data-performance] .bands .band {
-  width: auto;
-  min-width: 29px;
-  padding: 0 3px;
+.strip[data-performance] .band {
+  width: var(--s-mixer-band-w);
+  flex: none;
 }
-.channelVolume {
+
+/* A row of the channel: what it is (or its kill button), then its knob. Deck
+   B's rows are the mirror of deck A's, as the measured strip has them. */
+.knobRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.channel[data-flipped] .knobRow { flex-direction: row-reverse; }
+.channelBody {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.channel[data-flipped] .channelBody { flex-direction: row-reverse; }
+.knobColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.faderColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.faderColumn .vFader { flex: 1; height: auto; min-height: 72px; }
+/* The fader with its channel meter beside it, towards the centre. */
+.faderRow { flex: 1; display: flex; gap: 3px; }
+.channel[data-flipped] .faderRow { flex-direction: row-reverse; }
+.faderRow .vFader { flex: none; }
+/* The top bar's meter turned upright: same thickness, track and colours. */
+.channelMeter {
+  position: relative;
+  flex: none;
+  width: var(--s-top-meter-h);
+  background: var(--c-meter-track);
+  overflow: hidden;
+}
+.channelMeterFill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top,
+    var(--c-meter-green) 0%, var(--c-meter-green) 70%,
+    var(--c-meter-yellow) 70%, var(--c-meter-yellow) 90%, var(--c-meter-red) 90%);
+}
+.strip[data-performance] .faderColumn .cueButton { width: 30px; }
+.rowLabel {
+  width: var(--s-mixer-band-w);
+  color: var(--c-text-dim);
+  font-weight: 600;
+  text-align: center;
+}
+.eqRows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 3px 0;
+  border-block: 1px solid var(--c-raised);
+}
+
+/* The A-GAIN knob a size up, with its travel drawn round it. */
+.knobBlock {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
 }
-.channelVolume input {
-  width: 84px;
-  accent-color: var(--c-accent);
+.perfKnob {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  margin: 3px;
+  border: 1px solid var(--c-outline);
+  border-radius: 50%;
+  background: var(--c-mixer-knob);
+  cursor: ns-resize;
+  touch-action: none;
 }
+.perfKnob:focus-visible { outline: 1px solid var(--c-accent); outline-offset: 4px; }
+/* A controller's knob not yet moved: where it really is, nobody knows. */
+.perfKnob[data-pending], .vFader[data-pending], .hFader[data-pending] { opacity: 0.4; }
+.perfKnob[data-pending] { border-style: dashed; }
+.knobArc {
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  pointer-events: none;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+}
+.perfTick {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  width: 2px;
+  height: 10px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--c-mixer-knob-pointer);
+  transform-origin: 50% 100%;
+}
+.knobCaption {
+  color: var(--c-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The measured crossfader's line and handle, as a channel fader and as a
+   horizontal crossfader. */
+.vFader, .hFader {
+  position: relative;
+  flex: none;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.vFader { width: var(--s-mixer-fader-handle-w); height: 96px; }
+.hFader { width: 112px; height: 22px; cursor: ew-resize; }
+.vFader:focus-visible, .hFader:focus-visible { outline: 1px solid var(--c-accent); }
+.vFader::before, .hFader::before {
+  content: "";
+  position: absolute;
+  background: var(--c-raised);
+  border-radius: 2px;
+}
+.vFader::before { left: 50%; top: 0; bottom: 0; width: 4px; margin-left: -2px; }
+.hFader::before { top: 50%; left: 0; right: 0; height: 4px; margin-top: -2px; }
+/* A detent mark at the crossfader's centre. */
+.hFader::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: var(--c-mixer-label);
+}
+.faderFill {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 4px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: var(--c-accent);
+  pointer-events: none;
+}
+.faderCap {
+  position: absolute;
+  z-index: 1;
+  border: 1px solid var(--c-outline);
+  border-radius: 2px;
+  background: var(--c-mixer-knob);
+  pointer-events: none;
+}
+.faderCap::after {
+  content: "";
+  position: absolute;
+  background: var(--c-mixer-knob-pointer);
+}
+.vFader .faderCap { left: 0; right: 0; height: 12px; margin-top: -6px; }
+.vFader .faderCap::after { left: 3px; right: 3px; top: 50%; height: 2px; margin-top: -1px; }
+.hFader .faderCap { top: 0; bottom: 0; width: 12px; margin-left: -6px; }
+.hFader .faderCap::after { top: 3px; bottom: 3px; left: 50%; width: 2px; margin-left: -1px; }
 .channelError { color: var(--c-cue-head); }
 .strip[data-performance] .fader {
   position: relative;
@@ -251,15 +437,14 @@
   translate: none;
   flex-direction: row;
   justify-content: center;
+  align-items: center;
   gap: 8px;
-  padding: 3px;
+  padding: 4px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-raised);
 }
-.strip[data-performance] .faderTrack {
-  height: 42px;
-}
-/* Keep the native range keyboard focus and thumb discoverable. */
-.eqBand input:focus-visible, .channelVolume input:focus-visible,
-.mixerHeader button:focus-visible {
+.strip[data-performance] .fader > .knobBlock { margin-right: auto; }
+.mixerHeader button:focus-visible, .mixerHeader select:focus-visible, .beatFx button:focus-visible {
   outline: 1px solid var(--c-accent);
   outline-offset: 1px;
 }

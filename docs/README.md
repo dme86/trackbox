@@ -22,6 +22,7 @@ Commands in these guides run from the repository root unless stated otherwise.
 - [USB export](user/usb-export.md): compatibility conversion and playlist cleanup.
 - [Backups](user/backups.md): backup contents, storage, and restoration.
 - [Waveform scrubbing](user/waveform-scrubbing.md): drag behavior and its audio filter.
+- [DDJ-FLX4 controller](user/controller-ddj-flx4.md): setup, control mapping, limitations, and troubleshooting.
 - [AppleScript](user/applescript.md): macOS automation, objects, commands, and examples.
 
 ## Technical references
@@ -34,6 +35,7 @@ Commands in these guides run from the repository root unless stated otherwise.
 - [Analysis crate](../crates/rbl-analysis/README.md): algorithm reading path and evaluation tools.
 - [Waveform calibration](reference/waveform-analysis.md): measured overview behavior and its limits.
 - [Playback crate](../crates/rbl-deck/README.md): thread model, code map, and test workflow.
+- [Controller crate](../crates/rbl-control/README.md): DDJ-FLX4 decoding, LEDs, and the MIDI capture tool.
 - [Playback test fixtures](../crates/rbl-deck/tests/fixtures/README.md): generated audio and regeneration.
 - [Licensing](../LICENSING.md): bundled library terms.
 

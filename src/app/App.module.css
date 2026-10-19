@@ -206,6 +206,15 @@
    auto-placed into a second row under everything else. */
 .rightRail { grid-row: 1; grid-column: -1; }
 
+/* The Information Window and Track Suggestion share the panel column, one
+   above the other when both are open. */
+.sidePanels {
+  display: grid;
+  grid-auto-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
 /* The gutter between the tree and the browser, which is also the drag handle.
    Black, and narrower than the capture's seven points by request. Painting it
    the tree's own colour, as it was, left no visible gap at all; the `::after`
@@ -233,7 +242,34 @@
   grid-template-areas: "rail gap mixer a b" "gutter gutter gutter gutter gutter";
   grid-template-rows: minmax(0, 1fr) auto;
   height: min(62vh, 600px);
-  min-height: 435px;
+  min-height: var(--s-player-vertical-min-h);
+}
+
+/* A height dragged on the gutter under the decks replaces the arrangement's
+   own, and the detail waveforms, whose rows are `1fr`, take the difference.
+   The two-deck token itself stays as measured: the mixer is capped at it. */
+.decks[data-sized] { --s-player-h: var(--decks-h); }
+.decks[data-mixer][data-sized] {
+  height: calc(var(--decks-h) + var(--s-player-gutter-h));
+}
+
+/* The gutter under the decks is their height's drag handle, drawn and caught
+   the way the tree's splitter is. */
+.playerGutter[role="separator"] {
+  position: relative;
+  z-index: 3;
+  cursor: row-resize;
+  touch-action: none;
+}
+.playerGutter[role="separator"]::after {
+  content: "";
+  position: absolute;
+  inset: -5px 0;
+}
+.playerGutter[role="separator"]:hover,
+.playerGutter[role="separator"]:focus-visible {
+  background: var(--c-raised);
+  outline: none;
 }
 .decks[data-orientation="vertical"] > .zoomSlot {
   grid-area: a;

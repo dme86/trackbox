@@ -30,6 +30,7 @@ mod explorer;
 mod device_library;
 mod link;
 mod rx3_link;
+mod controller;
 mod network_labels;
 pub mod logging;
 pub mod menu;
@@ -408,6 +409,7 @@ pub fn run() {
         .manage(Arc::new(crate::preview::Preview::default()))
         .manage(Arc::new(crate::grid::GridEditor::default()))
         .manage(Arc::new(crate::update::Updates::default()))
+        .manage(Arc::new(crate::controller::Controller::default()))
         .manage(crate::test_port::TestPort::default())
         .setup(|app| {
             screen_cache::initialize(app.handle());
@@ -417,6 +419,7 @@ pub fn run() {
             // scriptable classes, before any Apple Event can arrive.
             crate::scripting::install(app.handle());
             spawn_library_load(app.handle().clone());
+            crate::controller::start(app.handle());
             // Join the network on start: a passive watcher that hears every
             // player and mixer and reports them, so the shell can offer LINK
             // the moment one appears. Nothing is transmitted until LINK is on.
@@ -553,6 +556,22 @@ pub fn run() {
             commands::set_channel_trim,
             commands::set_channel_volume,
             commands::set_crossfade,
+            commands::set_channel_cue,
+            commands::set_channel_filter,
+            commands::set_crossfader_on,
+            commands::set_beat_fx,
+            commands::set_pad_fx,
+            commands::set_smart_cfx_on,
+            commands::set_smart_cfx_kind,
+            commands::smart_cfx_state,
+            commands::set_headphone_mix,
+            commands::set_cue_routing,
+            commands::controller_leds,
+            commands::controller_status,
+            commands::set_jog_vinyl,
+            commands::start_recording,
+            commands::stop_recording,
+            commands::recording_status,
             commands::set_eq_curve,
             commands::deck_state,
             commands::preview_play,
@@ -685,6 +704,7 @@ pub fn run() {
                 if matches!(event, tauri::RunEvent::Exit) {
                     crate::screen_cache::save(handle);
                     crate::update::on_exit(handle);
+                    handle.state::<Arc<crate::controller::Controller>>().shutdown();
                 }
             });
         }

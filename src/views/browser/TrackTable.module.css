@@ -177,6 +177,16 @@
   will-change: transform;
 }
 .headCell { display: flex; align-items: center; }
+/* Renaming a heading, in place and in the heading's own type. */
+.headInput {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--c-text);
+  background: var(--c-black);
+  border: 1px solid var(--c-accent);
+  padding: 0 2px;
+}
 
 /* The resize grip: a few pixels at the right edge of every heading, wider than
    it looks so it can actually be grabbed. */
@@ -210,6 +220,8 @@
      panel's foot whatever the list's length (9.03.41 PM, 18 tracks). */
   grid-row: 3;
 }
+/* The controller's BROWSE knob is here, once it has been pressed to move between panes. */
+:global([data-browsing]) .scroll[data-browse-focus] { box-shadow: inset 0 0 0 1px var(--c-accent); }
 
 /* Drawn rather than left to the platform. macOS hides its scrollbars until
    something moves, so a list that is wider and longer than its pane gives no

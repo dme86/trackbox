@@ -356,6 +356,12 @@ export const SubBrowseIcon = (props: IconProps) => (
   </svg>
 );
 
+export const SuggestIcon = (props: IconProps) => (
+  <svg viewBox="0 0 18 18" aria-hidden focusable="false" {...props}>
+    <path d="M3 6h6M3 9h6M3 12h9" stroke="currentColor" strokeWidth="1"/> <path d="M13 3.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="currentColor"/>
+  </svg>
+);
+
 export const SyncIcon = (props: IconProps) => (
   <svg viewBox="0 0 16 16" aria-hidden focusable="false" {...props}>
     <path d="M3.2 6.6A5.2 5.2 0 0 1 12.4 4.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/> <path d="M12.8 1.6v3.4H9.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/> <path d="M12.8 9.4A5.2 5.2 0 0 1 3.6 11.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/> <path d="M3.2 14.4V11h3.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>

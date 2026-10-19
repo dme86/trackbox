@@ -8,7 +8,7 @@
  * and My Tag filtering is the Track Filter's. The two remaining buttons
  * are vertically centered as a group. The wording is german.lang's.
  */
-import { InfoIcon, SubBrowseIcon } from "@/components/icons";
+import { InfoIcon, SubBrowseIcon, SuggestIcon } from "@/components/icons";
 import styles from "./RightRail.module.css";
 import { useTooltip } from "@/store/usePreferences";
 
@@ -19,9 +19,11 @@ export interface RightRailProps {
   onToggleInfo: () => void;
   subOpen: boolean;
   onToggleSub: () => void;
+  suggestOpen: boolean;
+  onToggleSuggest: () => void;
 }
 
-export function RightRail({ className, infoOpen, onToggleInfo, subOpen, onToggleSub }: RightRailProps) {
+export function RightRail({ className, infoOpen, onToggleInfo, subOpen, onToggleSub, suggestOpen, onToggleSuggest }: RightRailProps) {
   const tip = useTooltip();
   return (
     <div className={className ? `${styles.rail} ${className}` : styles.rail} role="toolbar" aria-label="Browser panels" aria-orientation="vertical">
@@ -45,6 +47,16 @@ export function RightRail({ className, infoOpen, onToggleInfo, subOpen, onToggle
           onClick={onToggleSub}
         >
           <SubBrowseIcon className={styles.icon} />
+        </button>
+        <button
+          type="button"
+          className={styles.button}
+          title={tip("Display track suggestions for the master deck.")}
+          aria-label="Track Suggestion"
+          aria-pressed={suggestOpen}
+          onClick={onToggleSuggest}
+        >
+          <SuggestIcon className={styles.icon} />
         </button>
       </div>
     </div>

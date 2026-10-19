@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 
 import { getBackend } from "@/ipc/client";
 import type { AudioDevices, Limiter } from "@/ipc/types";
+import { useTranslation } from "@/i18n";
 import { BUFFER_SIZES, SAMPLE_RATES, type SampleRate } from "@/lib/preferences";
 import { CEILING_DB, DEFAULT_LIMITER, INPUT_GAIN_DB, RELEASE_MS } from "@/store/useLimiter";
 import { usePreferencesContext } from "@/store/usePreferences";
@@ -61,6 +62,7 @@ const REDUCTION_FULL_DB = 12;
 export function AudioPane({ limiter, onLimiterChange, reduction, vu, peakLeft = 0, peakRight = 0 }: AudioPaneProps) {
   const [audio, setAudio] = useState<AudioDevices | null>(null);
   const { preferences, update } = usePreferencesContext();
+  const t = useTranslation();
   const prefs = preferences.audio;
   const gainReduction = limiter.enabled && Number.isFinite(reduction) ? Math.max(0, reduction) : 0;
   const limiterStatus = !limiter.enabled ? "Off" : gainReduction >= 0.1 ? "Limiting" : "Ready";
@@ -145,6 +147,7 @@ export function AudioPane({ limiter, onLimiterChange, reduction, vu, peakLeft = 
         ends={[`${BUFFER_SIZES[0]}`, `${BUFFER_SIZES[BUFFER_SIZES.length - 1]}`]}
         onChange={(stop) => set({ bufferSize: BUFFER_SIZES[stop] ?? prefs.bufferSize })}
       />
+      <Note>With a DJ controller, 256 samples keeps the jog wheels tight; raise it if the dropout meter shows dropouts.</Note>
     </Section>
 
     <Section title="Metronome">
@@ -171,6 +174,71 @@ export function AudioPane({ limiter, onLimiterChange, reduction, vu, peakLeft = 
         ]}
         onChange={(metronomeVolume) => set({ metronomeVolume })}
       />
+    </Section>
+
+    <Section title="Mixer">
+      <Select
+        label="EQ curve"
+        value={prefs.eqCurve}
+        choices={[
+          { value: "eq", label: "EQ (bands cut to −26 dB)" },
+          { value: "isolator", label: "ISOLATOR (bands cut to silence)" },
+        ]}
+        onChange={(eqCurve) => set({ eqCurve })}
+      />
+      <Toggle label="Crossfader" checked={prefs.crossfader} onChange={(crossfader) => set({ crossfader })} />
+      <Toggle
+        label="Jog wheel: vinyl mode (scratch when touched)"
+        checked={prefs.jogVinyl}
+        onChange={(jogVinyl) => {
+          set({ jogVinyl });
+          void getBackend().then((backend) => backend.setJogVinyl(jogVinyl)).catch(() => {});
+        }}
+      />
+    </Section>
+
+    <Section title="Headphones">
+      <Select
+        label="Headphones"
+        value={prefs.headphones}
+        choices={[
+          { value: "auto", label: "Automatic (DDJ-FLX4: outputs 3/4)" },
+          { value: "off", label: "Off" },
+          { value: "lanes", label: "Outputs 3/4, master on 1/2" },
+          { value: "split", label: "Split: cue left, master right" },
+        ]}
+        onChange={(headphones) => set({ headphones })}
+      />
+      <Note>
+        Takes effect the next time a deck plays. A device with fewer than four
+        outputs is opened without separate headphones.
+      </Note>
+    </Section>
+
+    <Section title="Recording">
+      <div className={styles.row} data-nested="">
+        <span data-testid="recording-folder">{prefs.recordingFolder ?? "Music › Trackbox Recordings"}</span>
+      </div>
+      <div className={styles.actions}>
+        <Button
+          onClick={() => {
+            void getBackend()
+              .then((backend) => backend.pickFolder(t("Choose the recordings folder")))
+              .then((folder) => {
+                if (folder) set({ recordingFolder: folder });
+              })
+              .catch(() => {});
+          }}
+        >
+          Change folder…
+        </Button>
+        <Button disabled={prefs.recordingFolder === null} onClick={() => set({ recordingFolder: null })}>
+          Default
+        </Button>
+      </div>
+      <Note>
+        REC in the PERFORMANCE mixer records the master output, after the limiter, as 24-bit FLAC.
+      </Note>
     </Section>
 
     <Section title="RBXport Master Limiter">

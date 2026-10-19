@@ -1,12 +1,16 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { faderToTempo, TEMPO_RANGES, tempoRangeEnds, tempoToFader, type TempoRange } from "@/lib/player";
+import { faderToTempo, snapTempo, TEMPO_RANGES, tempoRangeEnds, tempoToFader, type TempoRange } from "@/lib/player";
 import styles from "./TempoField.module.css";
 
 /** A CDJ fader: down increases tempo, and the midpoint is always unity. */
-export function TempoSlider({ tempo, onTempo, idle, synced, masterTempo, onMasterTempo, onReset, resetLocked, onUnlock }: {
+export function TempoSlider({
+  tempo, onTempo, bpmX100, idle, synced, masterTempo, onMasterTempo, onReset, resetLocked, onUnlock, range: shared, onRange,
+}: {
   tempo: number;
   onTempo: (tempo: number) => void;
+  /** The track's own BPM ×100, for the fader to catch on whole BPMs. */
+  bpmX100: number;
   idle: boolean;
   synced: boolean;
   masterTempo: boolean;
@@ -14,14 +18,19 @@ export function TempoSlider({ tempo, onTempo, idle, synced, masterTempo, onMaste
   onReset: () => void;
   resetLocked: boolean;
   onUnlock: () => void;
+  /** The deck's range, when something else (a controller) can change it too. */
+  range?: TempoRange;
+  onRange?: (range: TempoRange) => void;
 }) {
-  const [range, setRange] = useState<TempoRange>(6);
+  const [own, setOwn] = useState<TempoRange>(6);
+  const range = shared ?? own;
+  const setRange = onRange ?? setOwn;
   const [cursor, setCursor] = useState<{ x: number; y: number; tempo: number } | null>(null);
   const ends = tempoRangeEnds(range);
   const disabled = idle || synced || resetLocked;
   const move = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const next = faderToTempo(2 * (event.clientY - rect.top) / Math.max(1, rect.height) - 1, range);
+    const next = snapTempo(faderToTempo(2 * (event.clientY - rect.top) / Math.max(1, rect.height) - 1, range), bpmX100);
     onTempo(next);
     setCursor({ x: rect.left, y: event.clientY, tempo: next });
   };

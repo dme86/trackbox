@@ -10,6 +10,9 @@
 
 
 .nodes { flex: 1; min-width: 0; overflow: auto; }
+/* The controller's BROWSE knob is on the rail or the tree, once it has been pressed to move between panes. */
+:global([data-browsing]) .tree[data-browse-focus="rail"] > :first-child,
+:global([data-browsing]) .tree[data-browse-focus="tree"] .nodes { box-shadow: inset 0 0 0 1px var(--c-accent); }
 /* The tree's scrollbar, as the 2026-09-09 capture (9.10.38 PM) draws it: a
    12pt black column at the tree's right edge with an 8pt thumb of the
    divider grey 2pt in, no end buttons, always showing. Beside the 5pt gutter

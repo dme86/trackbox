@@ -17,7 +17,7 @@ import type {
   DatabaseDrive, EditHistoryState, FilterValues, GridState, LibraryProblem, LibrarySummary, Limiter, LinkPeerSeen, LinkStatus, RelatedCriterion, RowDto, SortKey,
   SelectionDetails, SmartRule, StickDefaults, SyncPlaylist, SyncProgress, Tick, TrackDetails, TrackField,
   PreferencesRequest, RelocateSearch, UpdateCheck, UpdateProgress, UpdateReady, ExportProgress,
-  DeckId, TrackFilter, TreeNode, ViewHandle, ViewSpec, WaveformKind,
+  DeckId, TrackFilter, TreeNode, ViewHandle, ViewSpec, WaveformKind, SmartCfxState,
 } from "./types";
 import { TREE_ROOT } from "./types";
 import { applyEditFrom, validateEdit, isDynamicFrom, tempoX100, type EditableBeat } from "@/lib/gridEdit";
@@ -398,6 +398,8 @@ export function createMockBackend(options: MockOptions = {}): Backend {
     }
   }
   const colors = makeColors(trackCount);
+  let smartCfx: SmartCfxState = { on: false, kind: "echo" };
+  const smartCfxListeners = new Set<(state: SmartCfxState) => void>();
   const rowPositions = new Map(all.map((row, index) => [row.id, index]));
   // What the row DTO does not carry, made up per track and edited in place.
   const details = new Map<string, TrackDetails>();
@@ -1601,7 +1603,7 @@ export function createMockBackend(options: MockOptions = {}): Backend {
   let master = 0.891_250_9;
 
   /** The master limiter, likewise. */
-  let limiter: Limiter = { enabled: false, inputGainDb: -4, ceilingDb: 0, releaseMs: 250 };
+  let limiter: Limiter = { enabled: true, inputGainDb: -4, ceilingDb: 0, releaseMs: 250 };
 
   const preferencesRequestListeners = new Set<(what: PreferencesRequest) => void>();
 
@@ -2489,6 +2491,39 @@ export function createMockBackend(options: MockOptions = {}): Backend {
     setChannelTrim: () => wait(undefined),
     setChannelVolume: () => wait(undefined),
     setCrossfade: () => wait(undefined),
+    setChannelCue: () => wait(undefined),
+    setHeadphoneMix: () => wait(undefined),
+    setCueRouting: () => wait(undefined),
+    setChannelFilter: () => wait(undefined),
+    setCrossfaderOn: () => wait(undefined),
+    setBeatFx: () => wait(undefined),
+    onControllerIntent: () => () => undefined,
+    onControllerStatus: () => () => undefined,
+    onAudioDeviceLost: () => () => undefined,
+    // No audio engine behind the browser build, so nothing to record.
+    startRecording: () => Promise.reject(new Error("Recording needs the desktop app's audio engine.")),
+    stopRecording: () => wait(null),
+    recordingStatus: () => wait(null),
+    onRecordingStatus: () => () => undefined,
+    controllerStatus: () => wait({ name: null }),
+    controllerLeds: () => wait(undefined),
+    setJogVinyl: () => wait(undefined),
+    setPadFx: () => wait(undefined),
+    setSmartCfxOn: (on) => {
+      smartCfx = { ...smartCfx, on };
+      for (const listener of smartCfxListeners) listener(smartCfx);
+      return wait(undefined);
+    },
+    setSmartCfxKind: (kind) => {
+      smartCfx = { ...smartCfx, kind };
+      for (const listener of smartCfxListeners) listener(smartCfx);
+      return wait(undefined);
+    },
+    smartCfxState: () => wait(smartCfx),
+    onSmartCfx: (listener) => {
+      smartCfxListeners.add(listener);
+      return () => smartCfxListeners.delete(listener);
+    },
     setEqCurve: () => wait(undefined),
     deckScrubEnd: (deck) => {
       deckOf(deck).generation += 1;
